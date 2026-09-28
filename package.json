@@ -1,0 +1,19 @@
+{
+  "name": "rone-agent-base",
+  "version": "0.1.0",
+  "description": "Reusable agent orchestration control plane: Supabase spine + Railway cron worker + Anthropic tool-use loop.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "dispatch": "node src/dispatch.js",
+    "seed-check": "node scripts/seed-check.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@supabase/supabase-js": "^2.45.4",
+    "cron-parser": "^4.9.0"
+  }
+}

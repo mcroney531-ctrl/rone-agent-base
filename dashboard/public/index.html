@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Base Control Plane</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#111318" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0d0e12;
+      color: #e6e6ea;
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #23252d;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    main { padding: 16px 20px 48px; max-width: 960px; margin: 0 auto; }
+    section { margin-bottom: 32px; }
+    section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #9a9ba8; margin: 0 0 10px; }
+    .card {
+      background: #15161c;
+      border: 1px solid #23252d;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+    }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .muted { color: #9a9ba8; font-size: 12px; }
+    .pill {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .pill-succeeded, .pill-executed, .pill-approved { background: #123b23; color: #5fd989; }
+    .pill-failed, .pill-rejected { background: #3b1414; color: #f27272; }
+    .pill-running, .pill-pending, .pill-pending_approval { background: #3b2e12; color: #e0b04b; }
+    button {
+      background: #2b6cf6;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.secondary { background: #23252d; color: #e6e6ea; }
+    button.reject { background: #b23b3b; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    select, input[type="text"] {
+      background: #15161c;
+      border: 1px solid #23252d;
+      color: #e6e6ea;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 13px;
+    }
+    .empty { color: #6f7080; font-size: 13px; padding: 12px 0; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #c6c7d0; margin: 6px 0 0; }
+    .token-gate { max-width: 360px; margin: 80px auto; text-align: center; }
+    .token-gate input { width: 100%; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

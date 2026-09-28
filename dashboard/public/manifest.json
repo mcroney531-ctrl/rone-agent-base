@@ -1,0 +1,9 @@
+{
+  "name": "Agent Base Control Plane",
+  "short_name": "Agent Base",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0e12",
+  "theme_color": "#111318",
+  "icons": []
+}

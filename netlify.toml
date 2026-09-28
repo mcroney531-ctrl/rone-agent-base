@@ -1,0 +1,6 @@
+[build]
+  publish = "dashboard/public"
+  functions = "dashboard/netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
