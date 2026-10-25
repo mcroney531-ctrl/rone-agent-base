@@ -108,6 +108,13 @@ create table if not exists ops.executors (
   reaped_by     text,
   reaped_count  integer
 );
+-- Process metadata. Identity is the per-process executor_id; Railway IDs are context, never identity.
+alter table ops.executors
+  add column if not exists hostname text,
+  add column if not exists pid integer,
+  add column if not exists railway_deployment_id text,
+  add column if not exists railway_replica_id text,
+  add column if not exists git_sha text;
 
 -- Seed: tools + one test agent (every 30s) wired to the local test MCP server.
 insert into ops.tools (name, description, permission_level, default_risk) values

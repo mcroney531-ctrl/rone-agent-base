@@ -3,7 +3,7 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { DBOS, DBOSClient } from '@dbos-inc/dbos-sdk';
 import {
-  APP_NAME, BUILD_VERSION, DATABASE_URL, DRAIN_TIMEOUT_MS, EXECUTOR_ID, HTTP_PORT, VERSIONING,
+  APP_NAME, BUILD_VERSION, DATABASE_URL, DRAIN_TIMEOUT_MS, EXECUTOR_ID, FAKE_PROVIDER_URL, HTTP_PORT, VERSIONING,
   assertListenNotifyWorks, assertNotTransactionPooler,
 } from './config.js';
 import { pool } from './db.js';
@@ -33,6 +33,10 @@ function authorized(req: http.IncomingMessage): boolean {
 }
 
 await applySql('001_ops_schema.sql');
+// The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
+if (process.env.SPIKE_MCP_URL) {
+  await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
+}
 
 DBOS.setConfig({
   name: APP_NAME,
@@ -84,7 +88,26 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', 'http://x');
     const parts = url.pathname.split('/').filter(Boolean);
+    // Unauthenticated liveness for the platform healthcheck: says nothing beyond "this process serves".
+    if (req.method === 'GET' && url.pathname === '/livez') return send(res, 200, { ok: true, executor: EXECUTOR_ID });
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+
+    if (req.method === 'GET' && url.pathname === '/admin/executors') {
+      const { rows } = await pool.query(`select * from ops.executors order by started_at`);
+      return send(res, 200, rows);
+    }
+    // Chaos hook for the real-environment validation: hard-kill this process mid-whatever.
+    if (req.method === 'POST' && url.pathname === '/admin/crash' && process.env.ENABLE_CHAOS === '1') {
+      send(res, 202, { killing: EXECUTOR_ID });
+      setTimeout(() => process.kill(process.pid, 'SIGKILL'), 50);
+      return;
+    }
+    // Spike-only passthrough so a remote driver can read/steer the fake provider over the private network.
+    if (parts[0] === 'admin' && parts[1] === 'provider' && ['stats', 'faults', 'reset'].includes(parts[2] ?? '')) {
+      const body = req.method === 'POST' ? JSON.stringify(await readJson(req)) : undefined;
+      const r = await fetch(`${FAKE_PROVIDER_URL}/${parts[2]}`, { method: req.method, body });
+      return send(res, r.status, await r.json());
+    }
 
     if (req.method === 'GET' && url.pathname === '/health') {
       const [health, attention] = await Promise.all([

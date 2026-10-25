@@ -1,5 +1,5 @@
 // Failure suite, handoff items 1-8 (t8 shells out to scripts/upgrade-test.sh).
-// Usage: npx tsx scripts/failure-suite.ts [t1 t1b t2 t3 t3b t4a t4b t4c t5 t6 t7 t8]
+// Usage: npx tsx scripts/failure-suite.ts [t1 t1b t2 t3 t3b t4a t4b t4c t4d t5 t6 t7 t8]
 // Needs: local Postgres (PG_ADMIN_URL) and `npx tsx src/externals.ts` running.
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -40,25 +40,29 @@ function callsPerTurn(calls: { wf: string; turn: number }[], wf: string) {
 async function t1(): Promise<Result> {
   const { url, db } = await freshDb('spike_t1');
   const mock = logFile('t1.mock');
-  const env = { MOCK_DELAY_MS: '800', MOCK_CALL_LOG: mock };
-  let a = await startWorker({ id: 't1-a', port: 7810, dbUrl: url, env });
+  const env = { MOCK_DELAY_MS: '800', MOCK_CALL_LOG: mock, RAILWAY_DEPLOYMENT_ID: 'dep-1111', RAILWAY_REPLICA_ID: 'rep-aaaa' };
+  let a = await startWorker({ id: 't1-boot1', port: 7810, dbUrl: url, env });
   const wf = await trigger(a, 'r1');
   await waitFor('model turn 2 in flight', () => mockCalls(mock).some((c) => c.turn === 2));
   await a.kill('SIGKILL');
   const stateAtKill = await one(db, `select status, executor_id from dbos.workflow_status where workflow_uuid = $1`, [wf]);
   const actionsAtKill = (await actionsFor(db, wf)).length;
-  a = await startWorker({ id: 't1-a', port: 7810, dbUrl: url, env, logName: 't1-a-restart' });
+  a = await startWorker({ id: 't1-boot2', port: 7810, dbUrl: url, env });
   const recoverMs = await waitFor('recovered run terminal', async () => (await runState(db, wf)) === 'succeeded', 30_000);
   const actions = await actionsFor(db, wf);
   const runs = await one(db, `select count(*)::int n, max(outcome) outcome from ops.runs where workflow_id = $1`, [wf]);
   const v = await one(db, `select run_state, recovery_attempts, executor_id from ops.v_runs where workflow_id = $1`, [wf]);
   const turns = callsPerTurn(mockCalls(mock), wf);
+  const executors = await all(db, `select executor_id, railway_deployment_id, railway_replica_id, reaped_by from ops.executors order by started_at`);
   await a.kill('SIGTERM');
-  const ok = v.run_state === 'succeeded' && actions.length === 3 && runs.n === 1 && turns[0] === 1 && turns[1] === 1;
+  const ok = v.run_state === 'succeeded' && v.executor_id === 't1-boot2' && actions.length === 3 && runs.n === 1 && turns[0] === 1 && turns[1] === 1;
   return {
-    id: 't1', title: 'Kill mid-agent-loop, same container restarts', classification: ok ? 'PASS' : 'FAIL',
-    metrics: { stateAtKill, actionsAtKill, recoverMs, finalState: v, actions: actions.length, distinctKeys: new Set(actions.map((x) => x.idempotency_key)).size, runLedgerRows: runs.n, modelCallsPerTurn: turns },
-    notes: ['Completed model calls (turns 0,1) were replayed from checkpoints, not re-paid; only the in-flight call re-ran.'],
+    id: 't1', title: 'Kill mid-agent-loop; the restarted process (same replica, NEW executor ID) takes over', classification: ok ? 'PASS WITH ADAPTER' : 'FAIL',
+    metrics: { stateAtKill, actionsAtKill, recoverMs, finalState: v, executors, actions: actions.length, distinctKeys: new Set(actions.map((x) => x.idempotency_key)).size, runLedgerRows: runs.n, modelCallsPerTurn: turns },
+    notes: [
+      'A restart is a new process, so it is a new executor; Railway replica/deployment IDs are recorded as metadata only.',
+      'Takeover is by the heartbeat sweep (DEAD_AFTER_MS), not DBOS launch recovery. Completed model calls (turns 0,1) replayed from checkpoints.',
+    ],
   };
 }
 
@@ -107,7 +111,7 @@ async function t2(): Promise<Result> {
   const rejectR = await a.http('POST', `/actions/${byType['email.draft'].id}/reject`, { by: 'rone' }).catch((e) => ({ status: -1, body: String(e) }));
   const exitCode = await Promise.race([a.exited, sleep(15_000).then(() => 'still-running')]);
   const atCrash = await providerStats();
-  a = await startWorker({ id: 't2-a', port: 7810, dbUrl: url, logName: 't2-a-restart' });
+  a = await startWorker({ id: 't2-b', port: 7810, dbUrl: url });
   // If the crash beat the 2nd approval/reject, do them now: approval must be retry-safe.
   for (const [k, op] of [['calendar.hold', 'approve'], ['email.draft', 'reject']] as const) {
     const cur = await one(db, `select status from ops.actions where id = $1`, [byType[k].id]);
@@ -241,7 +245,8 @@ async function versionScenario(name: string, oldEnv: Record<string, string>, new
   await waitFor('reasoning run done', async () => (await runState(db, wf)) === 'succeeded');
   const acts = Object.fromEntries((await actionsFor(db, wf)).map((x) => [x.logical_action, x]));
   await a.http('POST', `/actions/${acts['crm.note'].id}/approve`);
-  await waitFor('provider committed (old now hanging in markExecuted)', async () => (await providerStats()).committed === 1);
+  await waitFor('callProvider checkpointed (old now hanging in markExecuted)', async () =>
+    (await all(db, `select 1 from dbos.operation_outputs where workflow_uuid = $1 and function_name = 'callProvider'`, [acts['crm.note'].idempotency_key])).length === 1);
   await a.kill('SIGKILL');
   const b = await startWorker({ id: `${name}-new`, port: 7811, dbUrl: url, env: newEnv });
   await b.http('POST', `/actions/${acts['calendar.hold'].id}/approve`);
@@ -256,6 +261,52 @@ async function versionScenario(name: string, oldEnv: Record<string, string>, new
   const attention = await all(db, `select kind, ref, detail from ops.attention_queue where kind in ('run_stuck', 'queued_too_long', 'run_failed', 'action_failed', 'action_stuck', 'no_executor_for_version')`);
   const dbosErr = await one(db, `select error from dbos.workflow_status where workflow_uuid = $1`, [acts['crm.note'].idempotency_key]);
   return { db, url, b, acts, settle, final, oldSteps: await steps('crm.note'), newSteps: await steps('calendar.hold'), wfs, attention, dbosErr, stats: await providerStats() };
+}
+
+async function t4d(): Promise<Result> {
+  // Review's "nasty case": old container on old code + new container on patched code, overlapping;
+  // a workflow started under old code; old gets SIGTERM but its drain window is shorter than the work;
+  // the new executor takes it over and must resume the OLD branch.
+  const { url, db } = await freshDb('spike_t4d');
+  await resetExternals();
+  const oldW = await startWorker({ id: 't4d-old', port: 7810, dbUrl: url, env: { SPIKE_CODE_VARIANT: '1', HANG_IN_MARK_EXECUTED_MS: '15000', DRAIN_TIMEOUT_MS: '2000' } });
+  const wf = await trigger(oldW, 'r1');
+  await waitFor('reasoning run done', async () => (await runState(db, wf)) === 'succeeded');
+  const acts = Object.fromEntries((await actionsFor(db, wf)).map((x) => [x.logical_action, x]));
+  await oldW.http('POST', `/actions/${acts['crm.note'].id}/approve`);
+  await waitFor('callProvider checkpointed; old now inside markExecuted', async () =>
+    (await all(db, `select 1 from dbos.operation_outputs where workflow_uuid = $1 and function_name = 'callProvider'`, [acts['crm.note'].idempotency_key])).length === 1);
+  const newW = await startWorker({ id: 't4d-new', port: 7811, dbUrl: url, env: { SPIKE_CODE_VARIANT: '2' } });
+  const t0 = Date.now();
+  oldW.proc.kill('SIGTERM');
+  const oldExit = await oldW.exited;
+  const drainMs = Date.now() - t0;
+  const atOldExit = await one(db, `select status, executor_id from dbos.workflow_status where workflow_uuid = $1`, [acts['crm.note'].idempotency_key]);
+  await waitFor('new executor finished the old-code workflow', async () =>
+    (await one(db, `select status from ops.actions where id = $1`, [acts['crm.note'].id])).status === 'executed', 45_000);
+  const takeoverMs = Date.now() - t0;
+  await newW.http('POST', `/actions/${acts['calendar.hold'].id}/approve`);
+  await waitFor('new work on patched code', async () => (await one(db, `select status from ops.actions where id = $1`, [acts['calendar.hold'].id])).status === 'executed');
+  const steps = async (k: string) =>
+    (await all(db, `select function_name from dbos.operation_outputs where workflow_uuid = $1 order by function_id`, [acts[k].idempotency_key])).map((r) => r.function_name);
+  const oldSteps = await steps('crm.note');
+  const newSteps = await steps('calendar.hold');
+  const stats = await providerStats();
+  const oldRow = await one(db, `select executor_id, run_state from ops.v_runs where workflow_id = $1`, [acts['crm.note'].idempotency_key]);
+  const exec = await one(db, `select stopped_at is not null as drained_flag, reaped_by from ops.executors where executor_id = 't4d-old'`);
+  await newW.kill('SIGTERM');
+  const ok = oldExit === 0 && atOldExit.status === 'PENDING' && oldRow.executor_id === 't4d-new' && oldRow.run_state === 'succeeded'
+    && !oldSteps.includes('auditBeforeCall') && !oldSteps.some((n: string) => n.startsWith('DBOS.patch'))
+    && newSteps.includes('auditBeforeCall') && stats.attempts === 2 && stats.uniqueEffects === 2;
+  return {
+    id: 't4d', title: 'Old code drains (SIGTERM, short window) while patched new code overlaps; new takes over and resumes the OLD branch',
+    classification: ok ? 'PASS WITH ADAPTER' : 'FAIL',
+    metrics: { oldExitCode: oldExit, drainMs, workflowAtOldExit: atOldExit, takeoverMs, oldExecutor: exec, oldWorkflowFinal: oldRow, oldWorkflowSteps: oldSteps, newWorkflowSteps: newSteps, provider: stats },
+    notes: [
+      'Drain timed out with the workflow mid-step, so it stayed PENDING under the old executor; the new (patched) executor reaped it and DBOS.patch() returned false at the patch point, so the old step sequence resumed.',
+      'callProvider was replayed from its checkpoint: 2 provider attempts total for 2 actions, no re-call.',
+    ],
+  };
 }
 
 async function t4a(): Promise<Result> {
@@ -421,7 +472,7 @@ async function t7(): Promise<Result> {
   const wf = await trigger(a, 'sess');
   await waitFor('turn 2 in flight', () => mockCalls(mock).some((c) => c.wf === wf && c.turn === 2));
   await a.kill('SIGKILL');
-  a = await startWorker({ id: 't7-sess', port: 7810, dbUrl: sess, env: { MOCK_CALL_LOG: mock }, logName: 't7-sess-restart' });
+  a = await startWorker({ id: 't7-sess2', port: 7810, dbUrl: sess, env: { MOCK_CALL_LOG: mock } });
   await waitFor('recovered via session pooler', async () => (await runState(db, wf)) === 'succeeded');
   const act = (await actionsFor(db, wf))[0];
   const t0 = Date.now();
@@ -479,7 +530,7 @@ async function t8(): Promise<Result> {
 }
 
 // ---------------------------------------------------------------------------------------------
-const TESTS: Record<string, () => Promise<Result>> = { t1, t1b, t2, t3, t3b, t4a, t4b, t4c, t5, t6, t7, t8 };
+const TESTS: Record<string, () => Promise<Result>> = { t1, t1b, t2, t3, t3b, t4a, t4b, t4c, t4d, t5, t6, t7, t8 };
 const selected = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TESTS);
 const resultsPath = path.resolve('docs/spike-results.json');
 const results: Record<string, Result> = fs.existsSync(resultsPath) ? JSON.parse(fs.readFileSync(resultsPath, 'utf8')) : {};

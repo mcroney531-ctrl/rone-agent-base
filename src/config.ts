@@ -45,14 +45,26 @@ export async function assertListenNotifyWorks(url: string, timeoutMS = 3000): Pr
   }
 }
 
-// Unique per container (hard rule 5). Railway restarts of the same replica keep RAILWAY_REPLICA_ID,
-// so a crash-restart self-recovers at launch; a new deployment gets a new ID and its predecessor's
-// PENDING work is reclaimed by the dead-executor sweep (src/recovery.ts).
+// One executor = one process (hard rule 5, and DBOS's own definition of executorID). Every boot gets a
+// fresh ID, so nothing depends on how Railway's IDs behave across restarts or overlapping deploys: a
+// restarted process is a new executor, and the dead one's PENDING work is taken over by the heartbeat
+// sweep (src/recovery.ts). Railway IDs are recorded as metadata only (ops.executors).
+export const BOOT_ID = randomUUID();
+export const PROCESS_META = {
+  hostname: os.hostname(),
+  pid: process.pid,
+  railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID ?? null,
+  railwayReplicaId: process.env.RAILWAY_REPLICA_ID ?? null,
+  gitSha: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
+};
+// EXECUTOR_ID override is for the local failure suite; it must still be unique per process start
+// (registerExecutor refuses a reused ID).
 export const EXECUTOR_ID =
-  process.env.EXECUTOR_ID ?? process.env.RAILWAY_REPLICA_ID ?? `${os.hostname()}-${randomUUID().slice(0, 8)}`;
+  process.env.EXECUTOR_ID ??
+  [PROCESS_META.railwayDeploymentId?.slice(0, 8), PROCESS_META.railwayReplicaId?.slice(0, 8), BOOT_ID].filter(Boolean).join('-');
 
 if (process.env.DBOS__VMID) {
-  throw new Error('DBOS__VMID is set; executor identity must be unique per container. Use EXECUTOR_ID / RAILWAY_REPLICA_ID.');
+  throw new Error('DBOS__VMID is set; executor identity must be unique per process. Leave it unset.');
 }
 
 // 'patching' (default): constant DBOS version, breaking changes gated by DBOS.patch().

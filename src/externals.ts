@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
-const PORT = Number(process.env.EXTERNALS_PORT ?? 7801);
+const PORT = Number(process.env.EXTERNALS_PORT ?? process.env.PORT ?? 7801);
 const db = new pg.Pool({ connectionString: process.env.FAKE_PROVIDER_DATABASE_URL ?? process.env.DATABASE_URL });
 
 await db.query(`

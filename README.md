@@ -81,7 +81,8 @@ t7 expects pgbouncer on `:6432` with `spike_t7_tx` / `spike_t7_sess` / `spike_t7
 
 - **`DATABASE_URL`:** the Supabase **session pooler** (`…pooler.supabase.com:5432`) or the direct connection. The worker refuses port 6543 and any connection where LISTEN/NOTIFY doesn't round-trip.
 - **`API_TOKEN`:** required on Railway. Every request needs `Authorization: Bearer <token>`, because this API can approve external actions. Webhooks will also need provider signature checks before real use.
-- **Executor identity:** comes from `RAILWAY_REPLICA_ID`. Never set `DBOS__VMID`; the worker refuses it.
+- **Executor identity:** one fresh ID per process, generated at boot. Railway deployment/replica IDs are recorded in `ops.executors` as metadata only. Never set `DBOS__VMID` or `EXECUTOR_ID` in production.
 - **Versioning:** the default `DBOS_VERSIONING=patching` gives DBOS a constant version. Guard step-order changes with `DBOS.patch()`.
-- **Draining:** set Railway's deployment draining time ≥ `DRAIN_TIMEOUT_MS` (default 20s).
+- **Draining:** Railway's default draining time is 0s. Set it ≥ `DRAIN_TIMEOUT_MS` (20s is a spike value; tune from measured shutdowns).
+- **Healthcheck:** `/livez` (unauthenticated, returns only the executor ID).
 - **Tuning:** `HEARTBEAT_MS` (5s) and `DEAD_AFTER_MS` (30s) control how quickly a dead container's work is reclaimed.

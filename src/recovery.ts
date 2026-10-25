@@ -1,8 +1,9 @@
 // Railway recovery adapter (open question → pattern A + B).
 //
 // DBOS only auto-recovers, at launch, PENDING work whose executor_id equals its OWN executor ID.
-// With a unique ID per container (hard rule 5), a container that dies for good (old deployment)
-// leaves its PENDING workflows orphaned. This module:
+// Every process boots with a fresh ID (src/config.ts), so a dead process's PENDING workflows —
+// whether it crashed, was restarted, or was an old deployment — are orphaned until a live
+// executor takes them over. This module:
 //   - heartbeats this executor into ops.executors
 //   - lets exactly one live executor claim a dead one (atomic UPDATE ... WHERE reaped_at IS NULL)
 //   - resumes the dead executor's PENDING workflows with the public DBOS.resumeWorkflows() API,
@@ -10,16 +11,16 @@
 //   - fences: an executor that finds itself reaped exits instead of racing its own replacement
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { pool } from './db.js';
-import { DEAD_AFTER_MS, EXECUTOR_ID, HEARTBEAT_MS } from './config.js';
+import { DEAD_AFTER_MS, EXECUTOR_ID, HEARTBEAT_MS, PROCESS_META } from './config.js';
 
 export async function registerExecutor(): Promise<void> {
-  await pool.query(
-    `insert into ops.executors (executor_id, app_version) values ($1, $2)
-     on conflict (executor_id) do update
-       set app_version = excluded.app_version, last_seen_at = now(), stopped_at = null,
-           reaped_at = null, reaped_by = null, reaped_count = null`,
-    [EXECUTOR_ID, DBOS.applicationVersion],
+  const m = PROCESS_META;
+  const { rowCount } = await pool.query(
+    `insert into ops.executors (executor_id, app_version, hostname, pid, railway_deployment_id, railway_replica_id, git_sha)
+     values ($1, $2, $3, $4, $5, $6, $7) on conflict (executor_id) do nothing`,
+    [EXECUTOR_ID, DBOS.applicationVersion, m.hostname, m.pid, m.railwayDeploymentId, m.railwayReplicaId, m.gitSha],
   );
+  if (rowCount !== 1) throw new Error(`executor ID ${EXECUTOR_ID} was already used by another process; IDs must be unique per process`);
 }
 
 async function heartbeat(): Promise<void> {

@@ -1,20 +1,34 @@
 {
   "t1": {
     "id": "t1",
-    "title": "Kill mid-agent-loop, same container restarts",
-    "classification": "PASS",
+    "title": "Kill mid-agent-loop; the restarted process (same replica, NEW executor ID) takes over",
+    "classification": "PASS WITH ADAPTER",
     "metrics": {
       "stateAtKill": {
         "status": "PENDING",
-        "executor_id": "t1-a"
+        "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 3441,
+      "recoverMs": 8500,
       "finalState": {
         "run_state": "succeeded",
-        "recovery_attempts": "2",
-        "executor_id": "t1-a"
+        "recovery_attempts": "1",
+        "executor_id": "t1-boot2"
       },
+      "executors": [
+        {
+          "executor_id": "t1-boot1",
+          "railway_deployment_id": "dep-1111",
+          "railway_replica_id": "rep-aaaa",
+          "reaped_by": "t1-boot2"
+        },
+        {
+          "executor_id": "t1-boot2",
+          "railway_deployment_id": "dep-1111",
+          "railway_replica_id": "rep-aaaa",
+          "reaped_by": null
+        }
+      ],
       "actions": 3,
       "distinctKeys": 3,
       "runLedgerRows": 1,
@@ -27,7 +41,8 @@
       }
     },
     "notes": [
-      "Completed model calls (turns 0,1) were replayed from checkpoints, not re-paid; only the in-flight call re-ran."
+      "A restart is a new process, so it is a new executor; Railway replica/deployment IDs are recorded as metadata only.",
+      "Takeover is by the heartbeat sweep (DEAD_AFTER_MS), not DBOS launch recovery. Completed model calls (turns 0,1) replayed from checkpoints."
     ]
   },
   "t1b": {
@@ -35,7 +50,7 @@
     "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "recoverMsFromKill": 9498,
+      "recoverMsFromKill": 9720,
       "reaped": {
         "reaped_by": "t1b-b",
         "reaped_count": 1
@@ -93,12 +108,12 @@
         {
           "workflow_id": "spike-agent:calendar.hold:ada@example.com:manual-spike-agent-r1",
           "run_state": "succeeded",
-          "recovery_attempts": "2"
+          "recovery_attempts": "1"
         },
         {
           "workflow_id": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
           "run_state": "succeeded",
-          "recovery_attempts": "2"
+          "recovery_attempts": "1"
         }
       ],
       "finalActions": [
@@ -135,12 +150,12 @@
         "t3-old"
       ],
       "pendingOnOldAtKill": [
-        "sched-agent-spike-agent-2026-10-25T22:46:58.000Z",
+        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z",
         "manual-spike-agent-deploy-inflight",
-        "sched-agent-spike-agent-2026-10-25T22:47:00.000Z",
-        "sched-agent-spike-agent-2026-10-25T22:47:02.000Z"
+        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z",
+        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z"
       ],
-      "takeoverMs": 11116,
+      "takeoverMs": 9513,
       "inflightRun": {
         "run_state": "succeeded",
         "executor_id": "t3-new",
@@ -150,22 +165,23 @@
       "scheduledOccurrences": 9,
       "distinctOccurrences": 9,
       "byExecutor": {
-        "t3-new": 9
+        "t3-old": 1,
+        "t3-new": 8
       },
       "nonTerminalAtEnd": [],
       "duplicateActionGroups": 0,
       "modelTurnsRunMoreThanOnce": {
-        "sched-agent-spike-agent-2026-10-25T22:46:58.000Z": [
+        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z": [
           4
         ],
         "manual-spike-agent-deploy-inflight": [
-          3
+          4
         ],
-        "sched-agent-spike-agent-2026-10-25T22:47:00.000Z": [
+        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z": [
           2
         ],
-        "sched-agent-spike-agent-2026-10-25T22:47:02.000Z": [
-          1
+        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z": [
+          0
         ]
       }
     },
@@ -181,7 +197,7 @@
     "classification": "PASS",
     "metrics": {
       "exitCode": 0,
-      "drainMs": 3771,
+      "drainMs": 3817,
       "finalState": {
         "run_state": "succeeded",
         "executor_id": "t3b-old",
@@ -208,7 +224,7 @@
     "title": "Deploy a step-inserting code change while work is mid-flight (patching mode + DBOS.patch)",
     "classification": "PASS",
     "metrics": {
-      "settleMs": 5844,
+      "settleMs": 5043,
       "final": [
         {
           "logical_action": "calendar.hold",
@@ -317,7 +333,7 @@
         },
         {
           "kind": "action_stuck",
-          "ref": "d13eaa3a-9378-40e7-9b47-a6c2507d9dd7",
+          "ref": "a833254d-9d70-4584-b983-4d6e3e9ae168",
           "detail": "approved but executor failed"
         }
       ],
@@ -364,12 +380,62 @@
         "status": "executed",
         "error": null
       },
-      "drainedByOldBuildMs": 1009
+      "drainedByOldBuildMs": 1010
     },
     "notes": [
       "Hard rule 4 as written (version = build) strands an old build's in-flight work once the old container is gone: v2 executors will not dequeue v1 rows, even after resume.",
       "Approval-enqueued work with no appVersion went to the latest version and ran fine — stranding only hits work that had already started.",
       "Recovery requires keeping/starting an old-build executor until drained (or cross-version fork/rewind, which breaks the ID = idempotency-key rule)."
+    ]
+  },
+  "t4d": {
+    "id": "t4d",
+    "title": "Old code drains (SIGTERM, short window) while patched new code overlaps; new takes over and resumes the OLD branch",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "oldExitCode": 0,
+      "drainMs": 2029,
+      "workflowAtOldExit": {
+        "status": "PENDING",
+        "executor_id": "t4d-old"
+      },
+      "takeoverMs": 10898,
+      "oldExecutor": {
+        "drained_flag": true,
+        "reaped_by": "t4d-new"
+      },
+      "oldWorkflowFinal": {
+        "executor_id": "t4d-new",
+        "run_state": "succeeded"
+      },
+      "oldWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "newWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "DBOS.patch-audit-before-call",
+        "auditBeforeCall",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "provider": {
+        "attempts": 2,
+        "n": 2,
+        "committed": 2,
+        "deduped": 0,
+        "faults": 0,
+        "uniqueEffects": 2
+      }
+    },
+    "notes": [
+      "Drain timed out with the workflow mid-step, so it stayed PENDING under the old executor; the new (patched) executor reaped it and DBOS.patch() returned false at the patch point, so the old step sequence resumed.",
+      "callProvider was replayed from its checkpoint: 2 provider attempts total for 2 actions, no re-call."
     ]
   },
   "t5": {
@@ -423,7 +489,7 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "c720d591-b65b-4f62-aa48-d5bd71e4f59b",
+          "ref": "5c6a1485-c5f2-4df7-a958-f91d09e9fd0e",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {
@@ -491,7 +557,7 @@
           "health_state": "blocked",
           "last_outcome": "failed",
           "last_error_class": "connection_unavailable",
-          "last_finished_at": "2026-10-25T22:49:25.741Z",
+          "last_finished_at": "2026-10-25T23:38:57.115Z",
           "runs_24h": "4",
           "failures_24h": "3",
           "running_now": "0",
@@ -523,13 +589,13 @@
       },
       "sessionPooler": {
         "crashRecovery": "succeeded",
-        "approvalToExecutedMs": 819,
+        "approvalToExecutedMs": 1030,
         "dbosSelfTestWarning": false
       },
       "transactionPoolerWithGuardBypassed": {
         "booted": true,
         "dbosSelfTestWarning": true,
-        "runCompletedMs": 2231
+        "runCompletedMs": 2238
       }
     },
     "notes": [

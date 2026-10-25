@@ -2,6 +2,10 @@
 
 A guide to the one idea everything here rests on, using the spike's own code and test results as examples. Read it before changing anything in `src/workflows.ts`.
 
+## Where DBOS's storage shape may be known
+
+Only `sql/002_views.sql` (`ops.dbos_workflows()` → `ops.v_runs`) reads `dbos.*` tables. Application code uses DBOS's public API (`DBOS.*`, `DBOSClient`); health and dashboards read `ops.v_runs`. Don't add a second place that queries `dbos.*`.
+
 ## The model: replay, not resume
 
 A DBOS **workflow** is an ordinary async function. A **step** is a call wrapped in `DBOS.runStep(...)`, or a model or tool call wrapped by `durableCalls` / `durableTools` / `durableMCPTools`.
@@ -88,7 +92,9 @@ if (await DBOS.patch('audit-before-call')) {
 
 `DBOS.patch()` returns `false` for executions that already passed this point under old code, so they keep their old sequence, and `true` for everything else. Once no old executions remain, change `patch` → `deprecatePatch`, and later remove it.
 
-What does *not* need a patch: changing what happens *inside* a step, changing prompts or instructions, or adding a step at the very end of a workflow that no in-flight execution has reached yet. When unsure, patch.
+**This rule is absolute: any change to a workflow's step structure (insert, remove, reorder, rename a step, or change how many times a loop calls steps) ships behind a `DBOS.patch()` marker.** The default versioning mode keeps one constant DBOS version so new processes can recover old work (t4d: old code drained, new patched code took over and resumed the old branch). That only works because of this rule.
+
+What does *not* need a patch: changing what happens *inside* a step, or changing prompts or instructions. When unsure, patch.
 
 ## Rule 5: never hold a workflow open across a human
 
