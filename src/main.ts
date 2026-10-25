@@ -37,6 +37,10 @@ await applySql('001_ops_schema.sql');
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
 }
+// Real-model deploys tick less often than the 30s seed (each tick is ~5 paid model calls).
+if (process.env.SPIKE_SCHEDULE) {
+  await pool.query(`update ops.agents set schedule = $1 where id = 'spike-agent'`, [process.env.SPIKE_SCHEDULE]);
+}
 
 DBOS.setConfig({
   name: APP_NAME,
@@ -96,6 +100,11 @@ const server = http.createServer(async (req, res) => {
       const { rows } = await pool.query(`select * from ops.executors order by started_at`);
       return send(res, 200, rows);
     }
+    // Public DBOS API (not dbos.* tables): which steps a workflow has checkpointed so far.
+    if (req.method === 'GET' && parts[0] === 'admin' && parts[1] === 'steps' && parts[2]) {
+      const steps = (await DBOS.listWorkflowSteps(decodeURIComponent(parts[2]))) ?? [];
+      return send(res, 200, steps.map((s) => ({ id: s.functionID, name: s.name, error: s.error ? String(s.error) : null })));
+    }
     // Chaos hook for the real-environment validation: hard-kill this process mid-whatever.
     if (req.method === 'POST' && url.pathname === '/admin/crash' && process.env.ENABLE_CHAOS === '1') {
       send(res, 202, { killing: EXECUTOR_ID });
@@ -126,7 +135,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, rows);
     }
     if (req.method === 'GET' && url.pathname === '/runs') {
-      const { rows } = await pool.query(`select * from ops.v_runs order by created_at desc limit 50`);
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 1000);
+      const { rows } = await pool.query(`select * from ops.v_runs order by created_at desc limit $1`, [limit]);
       return send(res, 200, rows);
     }
     // POST /actions/:id/approve | /actions/:id/reject
