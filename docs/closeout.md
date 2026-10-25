@@ -89,6 +89,8 @@ As written, t4c shows it strands work on Railway. DBOS executors only dequeue ro
 
 ## Production validation (do before Locked)
 
+Runbook and Railway layout: [`railway-validation.md`](railway-validation.md). The Railway project `rone-agent-base` exists with `worker` / `externals` / `validator` configured but not yet deployed (waiting on secrets).
+
 1. **Real Supabase, session mode.** Use the actual **Session pooler** URI copied from the project's Connect panel; don't infer the mode from the port. Supabase lists: direct `:5432` (IPv6 by default), session pooler `:5432` (IPv4), transaction pooler `:6543` (IPv4); session mode is its recommended IPv4 path for persistent backends. Check DBOS migrations, scheduling, the live LISTEN/NOTIFY probe (the guard that matters more than the port check), and crash recovery.
 2. **Real Railway lifecycle.** Prove unique-process executors + heartbeat takeover across:
    - a hard crash (`POST /admin/crash` with `ENABLE_CHAOS=1`) followed by Railway's restart
