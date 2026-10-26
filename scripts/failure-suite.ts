@@ -552,4 +552,6 @@ for (const id of selected) {
   fs.mkdirSync(path.dirname(resultsPath), { recursive: true });
   fs.writeFileSync(resultsPath, JSON.stringify(results, null, 2));
 }
-process.exit(0);
+const failed = selected.filter((id) => results[id]?.classification === 'FAIL' || results[id]?.classification === 'ARCHITECTURAL PROBLEM');
+console.log(failed.length ? `\nFAILED: ${failed.join(', ')}` : `\nall ${selected.length} selected tests passed`);
+process.exit(failed.length ? 1 : 0);

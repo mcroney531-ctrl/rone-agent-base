@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  # The DBOS durability/recovery regression suite (docs/closeout.md, t1–t8). Required whenever
+  # runtime or recovery code changes: it kills real processes mid-workflow against real Postgres.
+  failure-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+      SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # t7 needs a session-mode and a transaction-mode pooler in front of the same database.
+      - name: Start pgbouncer (session + transaction pools)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq pgbouncer postgresql-client
+          sudo systemctl stop pgbouncer || true
+          cat > "$RUNNER_TEMP/pgbouncer.ini" <<EOF
+          [databases]
+          spike_t7_tx = host=127.0.0.1 port=5432 dbname=spike_t7 user=postgres pool_mode=transaction
+          spike_t7_sess = host=127.0.0.1 port=5432 dbname=spike_t7 user=postgres pool_mode=session
+          spike_t7b_tx = host=127.0.0.1 port=5432 dbname=spike_t7b user=postgres pool_mode=transaction
+          [pgbouncer]
+          listen_addr = 127.0.0.1
+          listen_port = 6432
+          unix_socket_dir =
+          auth_type = any
+          pool_mode = session
+          max_client_conn = 300
+          default_pool_size = 20
+          logfile = $RUNNER_TEMP/pgbouncer.log
+          pidfile = $RUNNER_TEMP/pgbouncer.pid
+          ignore_startup_parameters = extra_float_digits,options
+          EOF
+          pgbouncer -d "$RUNNER_TEMP/pgbouncer.ini"
+
+      - name: Start externals (fake provider + MCP server)
+        run: |
+          nohup node --import tsx src/externals.ts > "$RUNNER_TEMP/externals.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:7801/stats >/dev/null && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/externals.log"; exit 1
+
+      - name: Failure suite
+        run: npx tsx scripts/failure-suite.ts
+
+      - name: Upload logs and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-suite
+          path: |
+            docs/spike-results.json
+            ${{ runner.temp }}/suite-logs
+            ${{ runner.temp }}/*.log
