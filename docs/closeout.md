@@ -86,24 +86,26 @@ As written, t4c shows it strands work on Railway. DBOS executors only dequeue ro
 - **F7. Failure classes:** our code classifies failures it can catch (`provider_auth`, `provider_unavailable`, `connection_unavailable`, `validation`, `internal`). DBOS-level failures (crash loop, step-sequence mismatch) never reach our catch block, so `v_runs` labels them from status (`crash_loop`, `unclassified_workflow_error`).
 - **F8. Recovery latency with the adapter** is about `DEAD_AFTER_MS` + one sweep interval: ~10s at suite settings, ~40s at the defaults (5s heartbeat, 30s dead-after). That's fine for seconds-to-minutes workflows. With per-process IDs this applies to a plain crash-restart too, not only to deploys.
 - **F9. The crash window shows up in tests too:** one t4a run killed the old process after the provider accepted but *before* DBOS checkpointed `callProvider`. That workflow then correctly took the new branch and the provider deduplicated the re-call. The test now waits for the checkpoint itself. Same lesson as rule 3, seen from the harness side.
+- **F10. The Supabase session pooler's connection budget is a real constraint.** DBOS defaults (a 10-connection pool, a listener, and a 10-connection `DBOSClient`) plus our pool came to ~26 connections per worker, ~52 during an overlapping deploy, against a pooler that typically allows ~15 on a small instance. Pools are now env-tuned to ~7 per worker on Railway (`DBOS_POOL_SIZE=3`, `DBOS_CLIENT_POOL_SIZE=1`, `OPS_POOL_SIZE=2`); the deployed fake provider uses none.
+- **F11. Never start the worker through `npm start` on Railway.** Railway sent SIGTERM; npm exited (`npm error signal SIGTERM`) and the node process never ran its drain handler. Start the process directly (`node --import tsx src/main.ts`) so it receives the signal.
+- **F12. A variable change redeploys the branch head, not the pinned commit.** Railway built the latest commit on the branch when a variable changed, despite the service being pinned to an older SHA. Pin by keeping the branch where you want it, or re-pin after variable changes.
+- **F13. A Supabase password reset takes a moment to reach the pooler.** The first boot after the reset still failed auth and the restart a second later succeeded.
 
-## Production validation (do before Locked)
+## Production validation (2026-10-26, Railway us-east4 + Supabase link-hoarder session pooler + Claude Sonnet 5)
 
-Runbook and Railway layout: [`railway-validation.md`](railway-validation.md). The Railway project `rone-agent-base` exists with `worker` / `externals` / `validator` configured but not yet deployed (waiting on secrets).
+Runbook and Railway layout: [`railway-validation.md`](railway-validation.md). Evidence: the `[validate] {...}` lines in the Railway `validator` service logs, plus direct queries on the Supabase project.
 
-1. **Real Supabase, session mode.** Use the actual **Session pooler** URI copied from the project's Connect panel; don't infer the mode from the port. Supabase lists: direct `:5432` (IPv6 by default), session pooler `:5432` (IPv4), transaction pooler `:6543` (IPv4); session mode is its recommended IPv4 path for persistent backends. Check DBOS migrations, scheduling, the live LISTEN/NOTIFY probe (the guard that matters more than the port check), and crash recovery.
-2. **Real Railway lifecycle.** Prove unique-process executors + heartbeat takeover across:
-   - a hard crash (`POST /admin/crash` with `ENABLE_CHAOS=1`) followed by Railway's restart
-   - an overlapping redeploy with SIGTERM drain
-   - the t4d case on a real deploy: old container on old code, new on patched code, a workflow started under old code, old disappears, new resumes the old branch
+| Check | Result | Evidence |
+|---|---|---|
+| Supabase session pooler | **PASS** | Worker booted on `aws-0-us-east-1.pooler.supabase.com:5432`; LISTEN/NOTIFY probe passed; DBOS migrations + `ops` schema applied; schedule registered. Pools sized to ~7 connections per worker (see F10). |
+| Real model + MCP tool loop | **PASS** | Smoke: Claude Sonnet 5 called MCP `lookup_contact`, `read_state`, 3× `propose_action`, `write_state`; 14 checkpointed steps, 9s. Approve 2 / reject 1 → 2 executor effects, provider 2 attempts → 2 effects. Health `idle` → `healthy`. |
+| Hard crash mid-loop, Railway restart | **PASS WITH ADAPTER** | `/admin/crash` after the first model call + 2 tool calls. Railway restarted in ~2s as a **new executor**; it reaped the old one and finished the run 41.5s after the crash (30s dead-after + sweep). Completed steps replayed with identical tool-call IDs; no repeated model call; 3 actions, 0 duplicates. |
+| Overlapping redeploy, old code → patched code (t4d on Railway) | **PASS WITH ADAPTER** | 4-minute watch: 16 agent runs and 32 approved executors, all succeeded; provider 34 attempts → 34 effects. Mid-watch deploy of `SPIKE_CODE_VARIANT=2` with a 15s overlap: the old executor was reaped by the new one, which resumed its in-flight workflows. Executor workflows that had checkpointed `callProvider` under old code finished on the patched process with the **old step sequence** (no patch marker); one that hadn't reached the patch point took the new branch. Attention queue empty. |
+| SIGTERM drain on Railway | **FAIL → fixed** | See F11: the start command was `npm start`, and npm died on SIGTERM without running the worker's drain handler. The heartbeat takeover covered everything, so no work was lost, but pattern B was not running. Start command is now `node --import tsx src/main.ts`; re-verification below. |
 
-   Measure actual shutdown times to set `drainingSeconds` / `DRAIN_TIMEOUT_MS`.
-3. **Real Anthropic model.** With `ANTHROPIC_API_KEY` set, check the MCP + tool loop, checkpoint replay after a crash mid-loop, and a transient model failure. The model comes from `ops.agents.model`, default `claude-sonnet-5`.
-4. **Untested edges:**
-   - fencing of a reaped-but-alive executor (a network partition longer than `DEAD_AFTER_MS`)
-   - a same-minor DBOS patch upgrade (npm only carries the latest patch of each 5.x minor)
+Not covered on the real environment: a transient model failure (only the scripted model's 529/401 paths, t5); fencing of a reaped-but-alive executor.
 
 ## Housekeeping
 
 - The superseded build's `agent_base` schema still exists in the **link-hoarder** Supabase project; its SQL is kept in `supabase/legacy/`. Drop it with `drop schema agent_base cascade;` once you've confirmed nothing uses it.
-- The spike's `dbos.*` / `ops.*` schemas haven't been created in any Supabase project yet.
+- The spike's `dbos.*` / `ops.*` schemas now live in the **link-hoarder** Supabase project, created by the Railway worker. The validation runs left test rows in `ops.*` (agent `spike-agent`).

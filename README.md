@@ -53,7 +53,7 @@ npm install
 export DATABASE_URL=postgres://postgres@127.0.0.1:5432/spike        # direct or session pooler only
 export FAKE_PROVIDER_DATABASE_URL=postgres://postgres@127.0.0.1:5432/fake_provider
 npm run externals &          # fake provider + MCP server on :7801
-EXECUTOR_ID=local-dev npm start
+EXECUTOR_ID=local-dev npm start   # deployed: run node directly, see below
 ```
 
 The seeded `spike-agent` runs every 30s and proposes 3 actions. Approve them:
@@ -83,6 +83,7 @@ t7 expects pgbouncer on `:6432` with `spike_t7_tx` / `spike_t7_sess` / `spike_t7
 - **`API_TOKEN`:** required on Railway. Every request needs `Authorization: Bearer <token>`, because this API can approve external actions. Webhooks will also need provider signature checks before real use.
 - **Executor identity:** one fresh ID per process, generated at boot. Railway deployment/replica IDs are recorded in `ops.executors` as metadata only. Never set `DBOS__VMID` or `EXECUTOR_ID` in production.
 - **Versioning:** the default `DBOS_VERSIONING=patching` gives DBOS a constant version. Guard step-order changes with `DBOS.patch()`.
+- **Start command:** `node --import tsx src/main.ts`, not `npm start`. npm doesn't pass SIGTERM through, so the drain never runs.
 - **Draining:** Railway's default draining time is 0s. Set it ≥ `DRAIN_TIMEOUT_MS` (20s is a spike value; tune from measured shutdowns).
 - **Healthcheck:** `/livez` (unauthenticated, returns only the executor ID).
 - **Tuning:** `HEARTBEAT_MS` (5s) and `DEAD_AFTER_MS` (30s) control how quickly a dead container's work is reclaimed.

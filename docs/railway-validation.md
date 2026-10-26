@@ -4,8 +4,8 @@ Railway project **rone-agent-base**, environment `production`, three services, a
 
 | service | start | role |
 |---|---|---|
-| `worker` | `npm start` | the spike. Healthcheck `/livez`, restart on failure, `drainingSeconds` 25, `overlapSeconds` 15 |
-| `externals` | `npm run externals` | fake idempotent provider + test MCP server, private network only |
+| `worker` | `node --import tsx src/main.ts` (never `npm start`: npm swallows SIGTERM) | the spike. Healthcheck `/livez`, restart on failure, `drainingSeconds` 25, `overlapSeconds` 15 |
+| `externals` | `node --import tsx src/externals.ts` | fake idempotent provider + test MCP server, private network only |
 | `validator` | `node --import tsx scripts/railway-validate.ts` | runs one phase on the private network, logs `[validate] {...}`, then idles. Never restarts |
 
 ## Secrets (set by Rone in the Railway dashboard, never through Claude)
