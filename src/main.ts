@@ -46,6 +46,7 @@ DBOS.setConfig({
   name: APP_NAME,
   systemDatabaseUrl: DATABASE_URL,
   systemDatabaseSchemaName: 'dbos',
+  systemDatabasePoolSize: Number(process.env.DBOS_POOL_SIZE ?? 10),
   executorID: EXECUTOR_ID,
   ...(VERSIONING === 'patching' ? { enablePatching: true } : BUILD_VERSION ? { applicationVersion: BUILD_VERSION } : {}),
 });
@@ -55,7 +56,11 @@ await applySql('002_views.sql');
 await DBOS.registerQueue(AGENT_QUEUE, { concurrency: 4 });
 await DBOS.registerQueue(EXECUTOR_QUEUE, { concurrency: 8 });
 
-const client = await DBOSClient.create({ systemDatabaseUrl: DATABASE_URL, systemDatabaseSchemaName: 'dbos', applicationName: APP_NAME });
+// Approval enqueues through the caller's own transaction client, so this pool is nearly idle.
+const client = await DBOSClient.create({
+  systemDatabaseUrl: DATABASE_URL, systemDatabaseSchemaName: 'dbos', applicationName: APP_NAME,
+  systemDatabasePoolSize: Number(process.env.DBOS_CLIENT_POOL_SIZE ?? 2),
+});
 setExecutorEnqueuer(async (c, actionId, idempotencyKey) => {
   await client.enqueueInTransaction(c, { queueName: EXECUTOR_QUEUE, workflowName: 'executeAction', workflowID: idempotencyKey }, actionId);
 });
