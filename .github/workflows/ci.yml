@@ -37,7 +37,6 @@ jobs:
     env:
       PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
       DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
-      SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,6 +76,8 @@ jobs:
           cat "$RUNNER_TEMP/externals.log"; exit 1
 
       - name: Failure suite
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/failure-suite.ts
 
       - name: Upload logs and results
