@@ -3,17 +3,41 @@
 ## Board status
 
 ```
-#1 FOUNDATION   DBOS + AI SDK + our ops.* control plane
-Architecture    selected (DBOS); Flue off the critical path
-Local suite     PASSED (13/13, no ARCHITECTURAL PROBLEM)
-Production      PASSED on Railway + Supabase session pooler + Claude Sonnet 5 (see below)
+#1 — Agent Base / Control Plane
+FOUNDATION: DBOS + Vercel AI SDK + ops.* control plane
+STATUS: LOCKED (2026-10-26)
+
+Validation:
+Local failure suite       PASS
+Real Supabase             PASS
+Real Claude + MCP         PASS
+Railway hard crash        PASS
+Railway rolling deploy    PASS
+Patch/version migration   PASS
+External idempotency      PASS
+Graceful drain            PASS
 ```
 
-When the three production validations at the end of this doc pass, "provisional" comes off: #1 becomes **Locked**, and the next work is a useful workflow on this foundation, not more framework evaluation. Rule 4 is amended to patching mode (below), and that rule is absolute.
+Flue is off the critical path. Rule 4 is amended to patching mode, and it is absolute: any change to a workflow's step structure ships behind `DBOS.patch()`.
 
-- **Pinned:** `@dbos-inc/dbos-sdk@5.3.0`, `@dbos-inc/vercel-ai@0.5.4`, `ai@7.0.153`, `@ai-sdk/anthropic@4.0.88`, `@ai-sdk/mcp@2.0.84`, `@modelcontextprotocol/sdk@1.32.2`
-- **Where it ran:** local Postgres 16, a pgbouncer stand-in for the pooler, and a scripted model (no API key in the sandbox).
-- **Raw evidence:** `docs/spike-results.json`, from `scripts/failure-suite.ts`; all 13 tests pass on the current code.
+### Hardening backlog (after Lock, not architecture)
+
+- **H1. Zombie / reaped-but-alive executor.** DBOS changes a recovered workflow's ownership token and checks it transactionally at every checkpoint, so a stale executor stops at its next checkpoint. The remaining exposure is both executors running the same unfinished step, which step idempotency and provider keys already cover. Our heartbeat adapter is what makes the reap decision, so test it: stop one executor's heartbeat while its workflow keeps running, let another take over, then confirm one workflow outcome, no duplicate committed effect, the old executor loses ownership at its checkpoint, and health/attention settle.
+- **H2. Real-provider transient model failure.** The 529 vs 401 classification and retry are proven locally; induce a real transient Anthropic failure when there's a clean way to.
+
+### Decisions recorded at Lock
+
+- **Takeover timing stays at 5s heartbeat / 30s dead-after** (~40s end-to-end, about six missed heartbeats before a reap). Prefer slower recovery over false reaps from Postgres, network or event-loop hiccups. Make it configurable per workload only when a latency-sensitive workload exists.
+- **First real workflow: Calendar Prep / Agent Ops.** V1 is low-risk: a scheduled evening run reads tomorrow's calendar, picks what's worth preparing for, writes a concise brief, optionally proposes ACTIONS, and anything needing Rone shows in the phone Attention Queue. Nothing sends or writes without approval. Later actions: draft follow-up, create reminder, create Agent Ops calendar item, prepare meeting context. It exercises the whole path: scheduled occurrence → real connection → reasoning → STATE → ACTIONS → approval → mobile Attention Queue → deterministic execution.
+- **#1a is mobile-first at the action layer.** The phone is the primary check-and-act surface, an ops inbox rather than a dashboard: Attention Queue first; approve/reject; retry/run-now; pause/disable; auth/reauth prompts; quick health; drill into a failed run far enough to understand it. Deep debugging, logs, schema work and deploy ops stay desktop-first. This points toward a responsive custom frontend, not an admin tool as the permanent experience.
+
+```
+Needs You · 3
+
+Calendar Prep        2 proposed actions
+Gmail                Reauthorization needed
+Morning Agent        Recovered after crash
+```
 
 ## Decision gates
 
