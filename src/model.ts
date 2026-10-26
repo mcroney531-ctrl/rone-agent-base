@@ -108,7 +108,7 @@ function mockRanking(prompt: string) {
       ref: e.ref,
       why: `${e.title}: ${e.externalAttendees ? 'outside attendees' : 'linked material'} worth a look first.`,
       prep: ['Skim the linked material', 'Decide the one outcome you want'],
-      hold: e.docLinks.length ? { durationMinutes: 30, minutesBefore: 15 } : null,
+      hold: e.docLinks.length ? { idealMinutes: 45, minimumMinutes: 20, preferredLeadMinutes: 30 } : null,
     }));
   return { headline: `${items.length} worth preparing for`, items };
 }

@@ -45,7 +45,9 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
     title: (r) => `${ACTION_NAMES[r.extra?.logical_action] ?? r.extra?.logical_action ?? 'Action'} — approve?`,
     summary: (r) => {
       const p = r.extra?.payload ?? {};
-      if (r.extra?.logical_action === 'agentops.hold' && p.start) return `${p.title ?? 'Hold'} · ${fmtRange(p.start, p.end)}`;
+      if (r.extra?.logical_action === 'agentops.hold' && p.start) {
+        return `${p.title ?? 'Hold'} · ${fmtRange(p.start, p.end)}${p.movedFrom ? ' (moved: the earlier slot was taken)' : ''}`;
+      }
       return r.detail ?? '';
     },
     actions: () => [A.approve, A.reject],
@@ -57,7 +59,11 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
     actions: (r) => (r.ref.startsWith('google:') ? [A.reauth] : []),
   },
   run_failed: { severity: 'problem', title: () => 'Run failed', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
-  action_failed: { severity: 'problem', title: () => 'Action failed', actions: () => [A.dismiss] },
+  action_failed: {
+    severity: 'problem',
+    title: (r) => (r.extra?.logical_action === 'agentops.hold' ? 'Prep hold no longer fits' : 'Action failed'),
+    actions: () => [A.dismiss],
+  },
   brief_mirror_failed: { severity: 'problem', title: () => 'Calendar mirror not written', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
   action_stuck: { severity: 'problem', title: () => 'Approved action is stuck', actions: () => [A.dismiss] },
   run_stuck: { severity: 'problem', title: () => 'Run is stuck', actions: () => [A.dismiss] },

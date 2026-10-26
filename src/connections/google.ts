@@ -189,6 +189,7 @@ export type CalendarEvent = {
   eventType?: string;                 // default | focusTime | outOfOffice | workingLocation | birthday | fromGmail
   attachments?: { fileUrl?: string; title?: string }[];
   hangoutLink?: string;
+  transparency?: string;              // 'transparent' = shows as free
   htmlLink?: string;
   status?: string;
 };

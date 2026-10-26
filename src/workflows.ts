@@ -28,6 +28,7 @@ export type AgentRow = {
   mcp_server_url: string | null;
   approval_policy: { mode: 'auto' | 'pending_approval' | 'risk_threshold'; auto_at_or_below?: 'low' | 'medium' | 'high' };
   handler: string | null;
+  settings: { prepHolds?: Partial<import('./slots.js').SlotSettings> } | null;
   blocked_connections: string[];
 };
 
@@ -52,7 +53,7 @@ const RISK_RANK = { low: 0, medium: 1, high: 2 } as const;
 
 async function loadAgent(agentId: string): Promise<AgentRow> {
   const { rows } = await pool.query(
-    `select a.id, a.model, a.timezone, a.instructions, a.mcp_server_url, a.approval_policy, a.handler,
+    `select a.id, a.model, a.timezone, a.instructions, a.mcp_server_url, a.approval_policy, a.handler, a.settings,
             coalesce(array_agg(c.id) filter (where ac.required and c.status <> 'active'), '{}') as blocked_connections
        from ops.agents a
        left join ops.agent_connections ac on ac.agent_id = a.id
@@ -165,15 +166,19 @@ async function proposeAction(agent: AgentRow, sourceWorkflowId: string, proposal
 // Shared by every proposer: insert-once by idempotency key, then apply the agent's approval policy.
 export async function insertAction(
   agent: Pick<AgentRow, 'id' | 'approval_policy'>, sourceWorkflowId: string,
-  a: { action: string; target: string; payload: Record<string, unknown>; idempotencyKey: string },
+  // refreshPending: a re-proposal may update the payload while the action is still undecided; once the
+  // owner (or policy) decided, the row is never touched again.
+  a: { action: string; target: string; payload: Record<string, unknown>; idempotencyKey: string; refreshPending?: boolean },
 ) {
   const { action, target, payload, idempotencyKey } = a;
   const { rows } = await pool.query(
     `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
      select $1, $2, $3, $4, $5, t.default_risk, $6 from ops.tools t where t.name = $3
-     on conflict (idempotency_key) do update set updated_at = ops.actions.updated_at
+     on conflict (idempotency_key) do update set
+       payload = case when $7 and ops.actions.status = 'pending_approval' then excluded.payload else ops.actions.payload end,
+       updated_at = case when $7 and ops.actions.status = 'pending_approval' then now() else ops.actions.updated_at end
      returning id, status, risk_level`,
-    [agent.id, sourceWorkflowId, action, target, payload, idempotencyKey],
+    [agent.id, sourceWorkflowId, action, target, payload, idempotencyKey, Boolean(a.refreshPending)],
   );
   const row = rows[0];
   const p = agent.approval_policy;
@@ -266,7 +271,13 @@ async function executeActionBody(actionId: string) {
     await DBOS.runStep(async () => {
       const hang = Number(process.env.HANG_IN_MARK_EXECUTED_MS ?? 0);
       if (hang) await new Promise((r) => setTimeout(r, hang));
-      await pool.query(`update ops.actions set status = 'executed', result = $2, updated_at = now() where id = $1 and status = 'approved'`, [actionId, result]);
+      // A hold whose slot was taken at execution time is not "executed": it moved (a replacement awaits
+      // approval) or it failed with a reason the owner sees in Needs You.
+      const o = (result as { outcome?: string; message?: string }).outcome;
+      const [status, error] = o === 'moved' ? ['superseded', 'slot no longer free; a new slot was proposed']
+        : o === 'no_slot' ? ['failed', (result as { message: string }).message] : ['executed', null];
+      await pool.query(`update ops.actions set status = $3, result = $2, error = $4, updated_at = now() where id = $1 and status = 'approved'`,
+        [actionId, result, status, error]);
     }, { name: 'markExecuted' });
     await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', {}), { name: 'recordRunEnd' });
     return result;
@@ -280,7 +291,7 @@ async function executeActionBody(actionId: string) {
   }
 }
 
-async function callProvider(action: { idempotency_key: string; logical_action: string; target: string; payload: Record<string, unknown> }) {
+async function callProvider(action: { agent_id: string; idempotency_key: string; logical_action: string; target: string; payload: Record<string, unknown> }) {
   // Real providers dispatch by logical action inside the same step, so the step sequence is unchanged.
   if (action.logical_action === 'agentops.hold') return createAgentOpsHold(action);
   const res = await fetch(`${FAKE_PROVIDER_URL}/effects`, {
