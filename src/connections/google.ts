@@ -5,7 +5,7 @@
 // Endpoints are env-overridable so the whole lifecycle runs against a fake Google in CI.
 import { OpsError } from '../errors.js';
 import {
-  consumeOAuthState, ensurePending, getConnection, loadSecret, markActive, markChecked, markReauthRequired,
+  consumeOAuthState, ensurePending, getConnection, listConnections, loadSecret, markActive, markChecked, markReauthRequired,
   mergeMetadata, newOAuthState, saveSecret,
 } from './store.js';
 
@@ -151,6 +151,13 @@ export async function ensureAgentOpsCalendar(connectionId: string): Promise<{ ca
       if (!(e instanceof OpsError) || !/→ 404/.test(e.message)) throw e;
     }
   }
+  // Adopt an existing Agent Ops calendar we own before creating one, so lost metadata never duplicates it.
+  const list = await calendarFetch<{ items?: { id: string; summary?: string; accessRole?: string }[] }>(connectionId, '/users/me/calendarList?minAccessRole=owner');
+  const existing = (list.items ?? []).find((c) => c.summary === AGENT_OPS_SUMMARY && c.accessRole === 'owner');
+  if (existing) {
+    await mergeMetadata(connectionId, { agentOpsCalendarId: existing.id });
+    return { calendarId: existing.id, created: false };
+  }
   const cal = await calendarFetch<{ id: string }>(connectionId, '/calendars', {
     method: 'POST',
     body: JSON.stringify({
@@ -177,4 +184,21 @@ export async function listEvents(connectionId: string, calendarId: string, timeM
   const q = new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100' });
   const r = await calendarFetch<{ items?: CalendarEvent[] }>(connectionId, `/calendars/${encodeURIComponent(calendarId)}/events?${q}`);
   return (r.items ?? []).filter((e) => e.status !== 'cancelled');
+}
+
+// Every active Google connection gets its Agent Ops calendar without a manual step: called right after
+// consent and at worker boot. Best-effort: a failure is logged and recorded, never blocks the caller.
+export async function ensureAgentOpsCalendars(connectionIds?: string[]): Promise<void> {
+  const ids = connectionIds ?? (await listConnections())
+    .filter((c) => c.provider === 'google' && c.status === 'active' && !c.metadata?.agentOpsCalendarId)
+    .map((c) => c.id);
+  for (const id of ids) {
+    try {
+      const { calendarId, created } = await ensureAgentOpsCalendar(id);
+      console.log(`[connections] ${id}: Agent Ops calendar ${created ? 'created' : 'present'} (${calendarId})`);
+    } catch (e) {
+      console.error(`[connections] ${id}: could not ensure Agent Ops calendar: ${(e as Error).message}`);
+      await markChecked(id, `agent ops calendar: ${(e as Error).message}`);
+    }
+  }
 }

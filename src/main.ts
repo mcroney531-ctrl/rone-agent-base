@@ -11,7 +11,7 @@ import {
   AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
-import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, startGoogleAuth } from './connections/google.js';
+import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
@@ -83,6 +83,7 @@ if (process.env.DISABLE_SCHEDULES !== '1') {
 }
 
 await registerExecutor();
+ensureAgentOpsCalendars().catch((e) => console.error(`[connections] boot check failed: ${(e as Error).message}`));
 await sweepDeadExecutors();
 const stopLiveness = startLivenessLoops();
 console.log(`[main] executor=${EXECUTOR_ID} version=${DBOS.applicationVersion} schedules=${scheduled.length}`);
@@ -124,7 +125,8 @@ const server = http.createServer(async (req, res) => {
       const state = url.searchParams.get('state');
       if (url.searchParams.get('error') || !code || !state) return page(400, 'Google sign-in was cancelled or incomplete. Start again from the app.');
       try {
-        const { account } = await completeGoogleAuth(code, state);
+        const { connectionId, account } = await completeGoogleAuth(code, state);
+        await ensureAgentOpsCalendars([connectionId]);
         return page(200, `Connected Google as ${escapeHtml(account)}. You can close this tab.`);
       } catch (e) {
         console.error('[oauth] google callback failed:', (e as Error).message);
