@@ -32,7 +32,7 @@ const enc = encodeURIComponent;
 
 try {
   // ---- the shell is public, the data is not ----
-  const shell = await call('GET', '/app');
+  const shell = await call('GET', '/app/');
   const cfg = await call('GET', '/app/config');
   check('app shell + public config served without auth (no secrets in config)', shell.status === 200 && /Needs You/.test(shell.body)
     && cfg.body.supabaseUrl === `${EXTERNALS}/supabase` && cfg.body.supabaseKey === 'sb_publishable_test' && Object.keys(cfg.body).length === 2, cfg.body);

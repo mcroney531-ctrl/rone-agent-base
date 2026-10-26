@@ -203,7 +203,7 @@ export function mirrorBody(date: string, items: BriefItem[], headline: string) {
   const lines = items.map((i) => `${i.localStart ?? 'All day'}  ${i.title}`);
   return {
     summary: `Prep brief · ${n} item${n === 1 ? '' : 's'}`,
-    description: [headline, '', ...lines, '', `Open full brief → ${appUrl()}/app#/brief/${date}`].join('\n'),
+    description: [headline, '', ...lines, '', `Open full brief → ${appUrl()}/app/#/brief/${date}`].join('\n'),
     start: { date },
     end: { date: addDays(date, 1) },
     transparency: 'transparent', // shows as free: a mirror must never block the real schedule
