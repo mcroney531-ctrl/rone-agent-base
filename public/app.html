@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Agent Ops">
+<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/app/manifest.webmanifest">
+<title>Agent Ops</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --ink: #1b1b1a; --muted: #6b6b66; --line: #e4e4df;
+    --accent: #2f5bd3; --accent-ink: #ffffff; --danger: #b3261e; --problem: #b45309; --ok: #2e7d32;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151515; --card: #1f1f1e; --ink: #ececea; --muted: #9a9a94; --line: #2e2e2c;
+            --accent: #7c9cff; --accent-ink: #0e1430; --danger: #ff8a80; --problem: #fbbf24; --ok: #81c784; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; -webkit-text-size-adjust: 100%;
+         padding: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom)); }
+  main { max-width: 640px; margin: 0 auto; padding: 12px 16px 24px; }
+  header.top { display: flex; align-items: baseline; justify-content: space-between; margin: 8px 0 4px; }
+  .brand { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-size: 28px; margin: 4px 0 16px; display: flex; justify-content: space-between; align-items: baseline; }
+  h1 .count { font-size: 22px; color: var(--muted); font-weight: 600; }
+  h2 { font-size: 20px; margin: 8px 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 14px 12px; margin-bottom: 10px; }
+  .card.tap { cursor: pointer; }
+  .src { font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .src .sev-problem { color: var(--problem); }
+  .src .sev-decision { color: var(--accent); }
+  .title { font-weight: 600; margin: 4px 0 2px; }
+  .summary { color: var(--muted); font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button, .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 15px;
+                 padding: 9px 14px; border-radius: 10px; min-height: 40px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; }
+  .empty { text-align: center; color: var(--muted); padding: 48px 8px; }
+  .empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 4px; }
+  dl { margin: 0; } dt { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 12px; }
+  dd { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .back { color: var(--accent); background: none; border: none; padding: 8px 0; min-height: 0; }
+  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line);
+             display: flex; padding-bottom: env(safe-area-inset-bottom); }
+  nav.tabs a { flex: 1; text-align: center; padding: 12px 4px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 600; }
+  nav.tabs a.on { color: var(--accent); }
+  nav.tabs .badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 12px; }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 600px;
+           background: var(--ink); color: var(--bg); padding: 12px 14px; border-radius: 12px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+  input[type=email] { width: 100%; font: inherit; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 8px 0 12px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.healthy { color: var(--ok); } .pill.failing, .pill.blocked { color: var(--problem); }
+  ul.items { list-style: none; padding: 0; margin: 0; }
+  ul.items li { padding: 10px 0; border-top: 1px solid var(--line); } ul.items li:first-child { border-top: 0; }
+</style>
+</head>
+<body>
+<main id="view"><p class="muted">Loading…</p></main>
+<nav class="tabs" id="tabs" hidden>
+  <a href="#/" data-tab="needs">Needs You<span class="badge" id="badge" hidden></span></a>
+  <a href="#/briefs" data-tab="briefs">Briefs</a>
+  <a href="#/agents" data-tab="agents">Agents</a>
+</nav>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+
+const $view = document.getElementById('view');
+const cfg = await (await fetch('/app/config')).json();
+const sb = cfg.supabaseUrl ? createClient(cfg.supabaseUrl, cfg.supabaseKey, { auth: { persistSession: true, detectSessionInUrl: true, flowType: 'implicit' } }) : null;
+
+// ---------- tiny DOM helpers (all text goes through textContent) ----------
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+const render = (...nodes) => { $view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); };
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2600);
+}
+const ago = (iso) => {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 90) return 'just now'; if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`; return `${Math.round(s / 86400)}d ago`;
+};
+const rid = () => crypto.randomUUID();
+// 6-field cron (sec min hour dom mon dow). Plain words for the common daily case, raw cron otherwise.
+function describeSchedule(cron, tz) {
+  const [sec, min, hour, dom, mon, dow] = cron.trim().split(/\s+/);
+  const zone = tz === 'UTC' ? 'UTC' : tz.split('/').pop().replace(/_/g, ' ') + ' time';
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '*') {
+    const d = new Date(Date.UTC(2000, 0, 1, +hour, +min));
+    return `Daily ${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} ${zone}`;
+  }
+  return `Schedule ${cron} (${tz})`;
+}
+const enc = encodeURIComponent;
+
+// ---------- API ----------
+let session = null;
+class AuthError extends Error {}
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method ?? 'GET',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session?.access_token ?? ''}` },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401) { await sb?.auth.signOut(); session = null; throw new AuthError('Signed out'); }
+  if (res.status === 403) throw new AuthError(body.error ?? 'Not authorized');
+  return { status: res.status, body };
+}
+
+// ---------- screens ----------
+function loginScreen(note) {
+  document.getElementById('tabs').hidden = true;
+  const email = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email', required: true });
+  const btn = h('button', { class: 'primary', type: 'submit' }, 'Email me a sign-in link');
+  const form = h('form', { onsubmit: async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    const { error } = await sb.auth.signInWithOtp({ email: email.value.trim(), options: { emailRedirectTo: `${location.origin}/app`, shouldCreateUser: false } });
+    btn.disabled = false;
+    if (error) return toast(error.message);
+    render(h('div', { class: 'empty' }, h('b', {}, 'Check your email'), 'Open the link on this phone to sign in.'));
+  } }, email, btn);
+  render(h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops')), h('h1', {}, 'Sign in'),
+    note ? h('p', { class: 'muted' }, note) : null, form);
+}
+
+function actionButtons(item, after) {
+  return item.actions.map((a) => h('button', {
+    class: a.style ?? '',
+    onclick: async (e) => {
+      e.stopPropagation();
+      if (a.id === 'open') return go(item.type.startsWith('brief') ? `#/brief/${enc(item.ref)}` : `#/item/${enc(item.type)}/${enc(item.ref)}`);
+      if (a.id === 'reject' && !confirm(`Reject "${item.title}"?`)) return;
+      e.currentTarget.disabled = true;
+      try {
+        const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid() } });
+        if (r.body.redirect) { location.href = r.body.redirect; return; }
+        toast(r.body.message || (r.status < 300 ? 'Done' : 'Failed'));
+        after();
+      } catch (err) { handleErr(err); }
+    },
+  }, a.label));
+}
+
+async function needsYou() {
+  const { body: items } = await api('/attention');
+  setBadge(items.length);
+  const cards = items.map((it) => h('div', { class: 'card tap', onclick: () => go(`#/item/${enc(it.type)}/${enc(it.ref)}`) },
+    h('div', { class: 'src' }, h('span', {}, it.source), h('span', { class: `sev-${it.severity}` }, ago(it.createdAt))),
+    h('div', { class: 'title' }, it.title),
+    it.summary ? h('div', { class: 'summary' }, it.summary) : null,
+    h('div', { class: 'actions' }, actionButtons(it, needsYou))));
+  render(
+    h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops'), h('button', { class: 'back', onclick: () => route() }, 'Refresh')),
+    h('h1', {}, 'Needs You', h('span', { class: 'count' }, String(items.length))),
+    ...(cards.length ? cards : [h('div', { class: 'empty' }, h('b', {}, 'Nothing needs you'), 'Agents are running on their own.')]),
+  );
+}
+
+async function itemDetail(type, ref) {
+  const r = await api(`/attention/${enc(type)}/${enc(ref)}`);
+  if (r.status === 404) {
+    render(h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'), h('div', { class: 'empty' }, h('b', {}, 'All done'), 'This no longer needs you.'));
+    return;
+  }
+  const { item, facts } = r.body;
+  render(
+    h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'),
+    h('div', { class: 'src' }, h('span', {}, item.source), h('span', { class: `sev-${item.severity}` }, ago(item.createdAt))),
+    h('h2', {}, item.title),
+    item.summary ? h('p', { class: 'summary' }, item.summary) : null,
+    h('div', { class: 'actions' }, actionButtons(item, () => go('#/'))),
+    h('div', { class: 'card', style: 'margin-top:16px' }, h('dl', {}, facts.flatMap((f) => [h('dt', {}, f.label), h('dd', {}, f.value)]))),
+  );
+}
+
+async function briefs() {
+  const { body: list } = await api('/briefs');
+  render(
+    h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops')), h('h1', {}, 'Briefs'),
+    ...(list.length ? list.map((b) => h('div', { class: 'card tap', onclick: () => go(`#/brief/${b.id}`) },
+      h('div', { class: 'src' }, h('span', {}, b.brief_date), h('span', {}, `${b.item_count} to prep`)),
+      h('div', { class: 'title' }, b.headline ?? 'Brief'))) : [h('div', { class: 'empty' }, h('b', {}, 'No briefs yet'), 'The first one arrives at 8 PM.')]),
+  );
+}
+
+// Deliberately plain until the first real brief shapes the real view.
+async function brief(id) {
+  const r = await api(`/briefs/${enc(id)}`);
+  if (r.status !== 200) return render(h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), h('div', { class: 'empty' }, 'Brief not found.'));
+  const b = r.body;
+  if (!b.seen_at) api(`/briefs/${b.id}/seen`, { method: 'POST' }).catch(() => undefined);
+  render(
+    h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'),
+    h('div', { class: 'src' }, h('span', {}, b.brief_date), h('span', {}, `${b.items.length} of ${b.considered} events`)),
+    h('h2', {}, b.headline ?? 'Brief'),
+    h('div', { class: 'card' }, b.items.length ? h('ul', { class: 'items' }, b.items.map((i) => h('li', {},
+      h('div', { class: 'row' }, h('span', { class: 'title' }, i.title), h('span', { class: 'muted' }, i.localStart ?? 'All day')),
+      h('div', { class: 'summary' }, i.why),
+      i.prep?.length ? h('div', { class: 'summary' }, i.prep.map((p) => `• ${p}`).join('\n')) : null))) : h('p', { class: 'muted' }, 'Nothing worth preparing for.')),
+  );
+}
+
+async function agents() {
+  const { body: list } = await api('/agents');
+  render(
+    h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops')), h('h1', {}, 'Agents'),
+    ...list.map((a) => h('div', { class: 'card' },
+      h('div', { class: 'row' }, h('span', { class: 'title' }, a.name),
+        h('span', { class: `pill ${a.enabled ? a.health_state ?? '' : ''}` }, a.enabled ? (a.health_state ?? 'idle') : 'off')),
+      h('div', { class: 'muted' }, [
+        a.schedule ? describeSchedule(a.schedule, a.timezone) : 'Manual only',
+        a.last_finished_at ? ` · last run ${ago(a.last_finished_at)}${a.last_outcome ? ` (${a.last_outcome})` : ''}` : ' · no runs yet',
+      ].join('')),
+      a.enabled ? h('div', { class: 'actions' }, h('button', { onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        try {
+          const r = await api(`/agents/${enc(a.id)}/run`, { method: 'POST', body: { requestId: rid() } });
+          toast(r.status === 202 ? `${a.name} started` : (r.body.error ?? 'Could not start'));
+        } catch (err) { handleErr(err); }
+        e.currentTarget.disabled = false;
+      } }, 'Run now')) : null)),
+    h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
+      h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await sb.auth.signOut(); session = null; route(); } }, 'Sign out')),
+  );
+}
+
+// ---------- routing ----------
+function setBadge(n) { const b = document.getElementById('badge'); b.textContent = String(n); b.hidden = !n; }
+function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
+function handleErr(err) {
+  if (err instanceof AuthError) return session ? loginScreen(err.message) : loginScreen();
+  console.error(err); toast('Something went wrong. Pull to retry.');
+}
+
+async function route() {
+  if (!sb) return render(h('div', { class: 'empty' }, h('b', {}, 'Not configured'), 'Mobile sign-in is not set up on this server.'));
+  if (!session) return loginScreen();
+  document.getElementById('tabs').hidden = false;
+  const [, page, a, b] = (location.hash || '#/').slice(1).split('/');
+  for (const t of document.querySelectorAll('nav.tabs a')) t.classList.toggle('on', t.dataset.tab === ({ briefs: 'briefs', brief: 'briefs', agents: 'agents' }[page] ?? 'needs'));
+  try {
+    if (page === 'item') await itemDetail(decodeURIComponent(a), decodeURIComponent(b));
+    else if (page === 'briefs') await briefs();
+    else if (page === 'brief') await brief(decodeURIComponent(a));
+    else if (page === 'agents') await agents();
+    else await needsYou();
+  } catch (err) { handleErr(err); }
+}
+
+if (sb) {
+  session = (await sb.auth.getSession()).data.session;
+  sb.auth.onAuthStateChange((_event, s) => { const was = Boolean(session); session = s; if (was !== Boolean(s)) route(); });
+}
+addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && session) route(); });
+// The magic link lands with tokens in the URL fragment; supabase-js consumes them, then start on Needs You.
+if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app#/');
+route();
+</script>
+</body>
+</html>

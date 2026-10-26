@@ -90,6 +90,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-calendar-prep.ts
 
+      - name: Mobile inbox + owner-only auth
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-mobile.ts
+
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4

@@ -256,6 +256,13 @@ http
       const reqUrl = new URL(req.url ?? '/', 'http://x');
       const path = reqUrl.pathname;
       if (path.startsWith('/google/') && (await fakeGoogle(req, res, reqUrl))) return;
+      // Fake Supabase Auth: just enough of GET /auth/v1/user to test the owner guard.
+      if (path === '/supabase/auth/v1/user') {
+        const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+        if (!req.headers.apikey) return send(res, 401, { message: 'No API key found in request' });
+        const users: Record<string, string> = { 'owner-session': 'Owner@Example.com', 'other-session': 'someone@else.com' };
+        return users[token] ? send(res, 200, { id: token, email: users[token] }) : send(res, 403, { code: 403, msg: 'invalid JWT' });
+      }
 
       if (path === '/mcp') {
         const body = req.method === 'POST' ? await readBody(req) : undefined;

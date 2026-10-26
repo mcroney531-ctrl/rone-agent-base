@@ -86,7 +86,7 @@ try {
   const mirror = agentOps.find((e) => e.id === b1.mirror_event_id);
   check('mirror is one all-day Agent Ops event: "Prep brief · 2 items" + times + link', b1.mirror_status === 'written' && mirror
     && mirror.summary === 'Prep brief · 2 items' && mirror.start.date === DATE && mirror.end.date === '2026-11-02'
-    && /Acme pricing review/.test(mirror.description) && mirror.description.includes(`Open full brief → https://ops.example/briefs/${DATE}`), { b1, mirror });
+    && /Acme pricing review/.test(mirror.description) && mirror.description.includes(`Open full brief → https://ops.example/app#/brief/${DATE}`), { b1, mirror });
   check('nothing was ever written to the primary calendar', s1.primaryWrites === 0, s1);
 
   const holds1 = (await db.query(`select * from ops.actions where logical_action = 'agentops.hold'`)).rows;

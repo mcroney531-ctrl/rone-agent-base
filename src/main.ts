@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import { DBOS, DBOSClient } from '@dbos-inc/dbos-sdk';
 import {
   APP_NAME, BUILD_VERSION, DATABASE_URL, DRAIN_TIMEOUT_MS, EXECUTOR_ID, FAKE_PROVIDER_URL, HTTP_PORT, VERSIONING,
@@ -11,6 +10,8 @@ import {
   AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
 import { deeperPrep } from './calendarPrep.js';
+import { authenticate, callerLabel, publicAuthConfig } from './auth.js';
+import { actOnAttention, attentionDetail, listAgents, listAttention, runAgentNow } from './attention.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
@@ -26,18 +27,16 @@ if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
 const applySql = (file: string) =>
   pool.query(`select pg_advisory_xact_lock(727274); ${fs.readFileSync(new URL(`../sql/${file}`, import.meta.url), 'utf8')}`);
 
-const API_TOKEN = process.env.API_TOKEN;
-if (!API_TOKEN && process.env.RAILWAY_ENVIRONMENT) throw new Error('API_TOKEN must be set when deployed: the API can approve external actions');
-function authorized(req: http.IncomingMessage): boolean {
-  if (!API_TOKEN) return true;
-  const got = Buffer.from(req.headers.authorization ?? '');
-  const want = Buffer.from(`Bearer ${API_TOKEN}`);
-  return got.length === want.length && timingSafeEqual(got, want);
-}
+if (!process.env.API_TOKEN && process.env.RAILWAY_ENVIRONMENT) throw new Error('API_TOKEN must be set when deployed: the API can approve external actions');
+const APP_HTML = fs.readFileSync(new URL('../public/app.html', import.meta.url), 'utf8');
+const APP_MANIFEST = JSON.stringify({
+  name: 'Agent Ops', short_name: 'Agent Ops', start_url: '/app#/', display: 'standalone', background_color: '#f6f6f4', theme_color: '#f6f6f4',
+});
 
 await applySql('001_ops_schema.sql');
 await applySql('003_connections.sql');
 await applySql('004_calendar_prep.sql');
+await applySql('005_attention.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -136,7 +135,33 @@ const server = http.createServer(async (req, res) => {
         return page(400, 'That sign-in link is invalid or expired. Start again from the app.');
       }
     }
-    if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+    // The phone app shell is public (it holds no data); every call it makes is authenticated below.
+    if (req.method === 'GET' && (url.pathname === '/app' || url.pathname === '/app/')) {
+      return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', 'referrer-policy': 'no-referrer' }).end(APP_HTML);
+    }
+    if (req.method === 'GET' && url.pathname === '/app/config') return send(res, 200, publicAuthConfig());
+    if (req.method === 'GET' && url.pathname === '/app/manifest.webmanifest') {
+      return res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(APP_MANIFEST);
+    }
+
+    const auth = await authenticate(req);
+    if (!auth.ok) return send(res, auth.status, { error: auth.error });
+    const by = callerLabel(auth.caller);
+
+    // Needs You: GET /attention, GET /attention/:kind/:ref, POST /attention/:kind/:ref/:action
+    if (parts[0] === 'attention') {
+      if (req.method === 'GET' && parts.length === 1) return send(res, 200, await listAttention());
+      const [kind, ref] = [decodeURIComponent(parts[1] ?? ''), decodeURIComponent(parts[2] ?? '')];
+      if (req.method === 'GET' && parts.length === 3) {
+        const d = await attentionDetail(kind, ref);
+        return d ? send(res, 200, d) : send(res, 404, { error: 'no longer needs you' });
+      }
+      if (req.method === 'POST' && parts.length === 4) {
+        const r = await actOnAttention(kind, ref, parts[3], by, String((await readJson(req)).requestId ?? ''));
+        return send(res, r.status, r);
+      }
+    }
+    if (req.method === 'GET' && url.pathname === '/agents') return send(res, 200, await listAgents());
 
     if (req.method === 'GET' && url.pathname === '/connections') return send(res, 200, await listConnections());
     // Returns the Google consent URL to open in a browser; re-running it is how re-auth works.
@@ -197,7 +222,6 @@ const server = http.createServer(async (req, res) => {
     }
     // POST /actions/:id/approve | /actions/:id/reject
     if (req.method === 'POST' && parts[0] === 'actions' && parts[1] && ['approve', 'reject'].includes(parts[2] ?? '')) {
-      const by = String((await readJson(req)).by ?? 'dashboard');
       const out = parts[2] === 'approve' ? await approveAndEnqueue(parts[1], by) : await reject(parts[1], by);
       return send(res, out.ok ? 200 : 409, out);
     }
@@ -261,8 +285,9 @@ const server = http.createServer(async (req, res) => {
       if (!requestId) return send(res, 400, { error: 'requestId required' });
       const forDate = body.date === undefined ? undefined : String(body.date);
       if (forDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(forDate)) return send(res, 400, { error: 'date must be YYYY-MM-DD' });
+      if (!forDate) return send(res, 202, { workflowID: (await runAgentNow(parts[1], requestId)).workflowId });
       const workflowID = `manual-${parts[1]}-${requestId}`;
-      await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'manual', sourceEvent: requestId, ...(forDate ? { forDate } : {}) });
+      await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'manual', sourceEvent: requestId, forDate });
       return send(res, 202, { workflowID });
     }
     if (req.method === 'POST' && parts[0] === 'webhooks' && parts[1]) {
