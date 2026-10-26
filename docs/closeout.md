@@ -4,9 +4,9 @@
 
 ```
 #1 FOUNDATION   DBOS + AI SDK + our ops.* control plane
-Architecture    selected (DBOS); Flue off the critical path unless a real-env check fails
+Architecture    selected (DBOS); Flue off the critical path
 Local suite     PASSED (13/13, no ARCHITECTURAL PROBLEM)
-Production      validation pending: Supabase session pooler, Railway lifecycle, real Anthropic model
+Production      PASSED on Railway + Supabase session pooler + Claude Sonnet 5 (see below)
 ```
 
 When the three production validations at the end of this doc pass, "provisional" comes off: #1 becomes **Locked**, and the next work is a useful workflow on this foundation, not more framework evaluation. Rule 4 is amended to patching mode (below), and that rule is absolute.
@@ -101,7 +101,9 @@ Runbook and Railway layout: [`railway-validation.md`](railway-validation.md). Ev
 | Real model + MCP tool loop | **PASS** | Smoke: Claude Sonnet 5 called MCP `lookup_contact`, `read_state`, 3× `propose_action`, `write_state`; 14 checkpointed steps, 9s. Approve 2 / reject 1 → 2 executor effects, provider 2 attempts → 2 effects. Health `idle` → `healthy`. |
 | Hard crash mid-loop, Railway restart | **PASS WITH ADAPTER** | `/admin/crash` after the first model call + 2 tool calls. Railway restarted in ~2s as a **new executor**; it reaped the old one and finished the run 41.5s after the crash (30s dead-after + sweep). Completed steps replayed with identical tool-call IDs; no repeated model call; 3 actions, 0 duplicates. |
 | Overlapping redeploy, old code → patched code (t4d on Railway) | **PASS WITH ADAPTER** | 4-minute watch: 16 agent runs and 32 approved executors, all succeeded; provider 34 attempts → 34 effects. Mid-watch deploy of `SPIKE_CODE_VARIANT=2` with a 15s overlap: the old executor was reaped by the new one, which resumed its in-flight workflows. Executor workflows that had checkpointed `callProvider` under old code finished on the patched process with the **old step sequence** (no patch marker); one that hadn't reached the patch point took the new branch. Attention queue empty. |
-| SIGTERM drain on Railway | **FAIL → fixed** | See F11: the start command was `npm start`, and npm died on SIGTERM without running the worker's drain handler. The heartbeat takeover covered everything, so no work was lost, but pattern B was not running. Start command is now `node --import tsx src/main.ts`; re-verification below. |
+| SIGTERM drain on Railway | **FAIL → fixed** | See F11: the start command was `npm start`, and npm died on SIGTERM without running the worker's drain handler. The heartbeat takeover covered everything, so no work was lost, but pattern B was not running. Start command is now `node --import tsx src/main.ts`; on the next redeploy the drain handler ran (`SIGTERM: draining` → `drained, exiting`) and the executor recorded `stopped_at` within ~1s of Railway's SIGTERM (idle; nothing in flight). With in-flight work the drain waits for it (t3b locally). |
+
+**Drain sizing:** an idle worker shuts down in ~1s; a reasoning run takes ~9s and an executor ~2s. A drain of `DRAIN_TIMEOUT_MS=20000` with Railway `drainingSeconds=25` covers a full agent run with margin; anything longer is caught by heartbeat takeover (~40s).
 
 Not covered on the real environment: a transient model failure (only the scripted model's 529/401 paths, t5); fencing of a reaped-but-alive executor.
 
