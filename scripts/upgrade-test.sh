@@ -33,6 +33,7 @@ echo "== seed with DBOS $first"
 timeout 60 node "$dir/upgrade-probe.mjs" seed "$DB_URL" "probe-pending-$first" || true
 pending="probe-pending-$first"
 psql "$DB_URL" -q -f sql/001_ops_schema.sql
+psql "$DB_URL" -q -f sql/003_connections.sql
 psql "$DB_URL" -q -f sql/002_views.sql
 echo "migrations applied: $(psql_db 'select version from dbos.dbos_migrations')"
 echo "v_runs: $(psql_db "select string_agg(workflow_id || '=' || dbos_status, ', ' order by workflow_id) from ops.v_runs")"

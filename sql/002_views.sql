@@ -138,9 +138,13 @@ union all
 select 'queued_too_long', v.workflow_id, v.agent_id, v.created_at, 'queued on ' || coalesce(v.queue_name, '?') || ' at version ' || coalesce(v.app_version, 'latest')
   from ops.v_runs v where v.run_state = 'queued' and v.created_at < now() - interval '10 minutes'
 union all
-select 'connection_problem', c.id, ac.agent_id, coalesce(c.last_checked_at, c.updated_at), c.status || coalesce(': ' || c.last_error, '')
-  from ops.connections c join ops.agent_connections ac on ac.connection_id = c.id
- where c.status <> 'active'
+-- Every unhealthy connection, whether or not an agent uses it yet ('pending' = never authorized: not a problem).
+select 'connection_problem', c.id, min(ac.agent_id), coalesce(c.last_checked_at, c.updated_at),
+       case c.status when 'reauth_required' then 'Reauthorization needed' else c.status end
+         || coalesce(coalesce(' (' || c.account_label || ')', '') || ': ' || c.last_error, '')
+  from ops.connections c left join ops.agent_connections ac on ac.connection_id = c.id
+ where c.status not in ('active', 'pending')
+ group by c.id, c.last_checked_at, c.updated_at, c.status, c.account_label, c.last_error
 union all
 select 'executor_unreaped', e.executor_id, null, e.last_seen_at, 'stale heartbeat, not yet reaped — is any worker alive?'
   from ops.executors e where e.reaped_at is null and e.last_seen_at < now() - interval '2 minutes';

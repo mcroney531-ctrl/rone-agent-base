@@ -80,6 +80,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/failure-suite.ts
 
+      - name: Connections lifecycle (fake Google OAuth + Calendar)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-connections.ts
+
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4

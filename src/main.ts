@@ -11,6 +11,8 @@ import {
   AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
+import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, startGoogleAuth } from './connections/google.js';
+import { listConnections } from './connections/store.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
   console.warn('[main] UNSAFE_SKIP_CONNECTION_GUARD=1 — connection-mode guard disabled (failure-suite only)');
@@ -33,6 +35,7 @@ function authorized(req: http.IncomingMessage): boolean {
 }
 
 await applySql('001_ops_schema.sql');
+await applySql('003_connections.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -84,6 +87,10 @@ await sweepDeadExecutors();
 const stopLiveness = startLivenessLoops();
 console.log(`[main] executor=${EXECUTOR_ID} version=${DBOS.applicationVersion} schedules=${scheduled.length}`);
 
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
 async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
@@ -99,7 +106,38 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split('/').filter(Boolean);
     // Unauthenticated liveness for the platform healthcheck: says nothing beyond "this process serves".
     if (req.method === 'GET' && url.pathname === '/livez') return send(res, 200, { ok: true, executor: EXECUTOR_ID });
+    // OAuth redirect target: necessarily public (the browser lands here from Google). It trusts only a
+    // single-use, unexpired `state` minted by an authenticated POST /connections/google.
+    if (req.method === 'GET' && url.pathname === '/oauth/google/callback') {
+      const page = (status: number, msg: string) =>
+        res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' })
+          .end(`<!doctype html><meta name="viewport" content="width=device-width"><p style="font:16px system-ui;padding:24px">${msg}</p>`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      if (url.searchParams.get('error') || !code || !state) return page(400, 'Google sign-in was cancelled or incomplete. Start again from the app.');
+      try {
+        const { account } = await completeGoogleAuth(code, state);
+        return page(200, `Connected Google as ${escapeHtml(account)}. You can close this tab.`);
+      } catch (e) {
+        console.error('[oauth] google callback failed:', (e as Error).message);
+        return page(400, 'That sign-in link is invalid or expired. Start again from the app.');
+      }
+    }
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+
+    if (req.method === 'GET' && url.pathname === '/connections') return send(res, 200, await listConnections());
+    // Returns the Google consent URL to open in a browser; re-running it is how re-auth works.
+    if (req.method === 'POST' && url.pathname === '/connections/google') {
+      const id = String((await readJson(req)).id ?? 'google:primary');
+      if (!/^google:[a-z0-9_-]{1,40}$/.test(id)) return send(res, 400, { error: 'id must look like google:<name>' });
+      return send(res, 200, { connectionId: id, authUrl: await startGoogleAuth(id) });
+    }
+    if (req.method === 'POST' && parts[0] === 'connections' && parts[1] && parts[2] === 'check') {
+      return send(res, 200, await checkGoogleConnection(decodeURIComponent(parts[1])));
+    }
+    if (req.method === 'POST' && parts[0] === 'connections' && parts[1] && parts[2] === 'agent-ops-calendar') {
+      return send(res, 200, await ensureAgentOpsCalendar(decodeURIComponent(parts[1])));
+    }
 
     if (req.method === 'GET' && url.pathname === '/admin/executors') {
       const { rows } = await pool.query(`select * from ops.executors order by started_at`);
