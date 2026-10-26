@@ -41,6 +41,18 @@ function scriptedMock() {
         throw new APICallError({ message: 'overloaded', url: 'mock://', requestBodyValues: {}, statusCode: 529, isRetryable: true });
       }
 
+      // Calendar Prep paths: structured ranking (JSON response format) and the deeper-prep text pass.
+      const promptText = options.prompt
+        .map((m) => (Array.isArray(m.content) ? (m.content as unknown[]) : [m.content]))
+        .flat()
+        .map((c) => (typeof c === 'string' ? c : c && typeof c === 'object' && 'text' in c ? String(c.text) : ''))
+        .join('\n');
+      const stop = (text: string) => ({
+        content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
+      });
+      if (options.responseFormat?.type === 'json') return stop(JSON.stringify(mockRanking(promptText)));
+      if (promptText.includes('<deeper>')) return stop('## Context\nMock deeper prep.\n## Questions to ask\n- What does success look like?');
+
       const call = (id: string, toolName: string, input: unknown) => ({
         type: 'tool-call' as const,
         toolCallId: `t${turn}-${id}`,
@@ -84,4 +96,19 @@ function scriptedMock() {
       }
     },
   });
+}
+
+// Picks events with outside attendees or linked docs (what a sensible ranker would), holds for doc-heavy ones.
+function mockRanking(prompt: string) {
+  const m = /<events>([\s\S]*)<\/events>/.exec(prompt);
+  const events = (m ? JSON.parse(m[1]) : []) as { ref: string; title: string; externalAttendees: number; docLinks: string[] }[];
+  const items = events
+    .filter((e) => e.externalAttendees > 0 || e.docLinks.length > 0)
+    .map((e) => ({
+      ref: e.ref,
+      why: `${e.title}: ${e.externalAttendees ? 'outside attendees' : 'linked material'} worth a look first.`,
+      prep: ['Skim the linked material', 'Decide the one outcome you want'],
+      hold: e.docLinks.length ? { durationMinutes: 30, minutesBefore: 15 } : null,
+    }));
+  return { headline: `${items.length} worth preparing for`, items };
 }

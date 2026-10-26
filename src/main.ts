@@ -10,6 +10,7 @@ import { pool } from './db.js';
 import {
   AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
+import { deeperPrep } from './calendarPrep.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
@@ -36,6 +37,7 @@ function authorized(req: http.IncomingMessage): boolean {
 
 await applySql('001_ops_schema.sql');
 await applySql('003_connections.sql');
+await applySql('004_calendar_prep.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -69,7 +71,7 @@ setExecutorEnqueuer(async (c, actionId, idempotencyKey) => {
 });
 
 // Schedules come from config rows: adding an agent = inserting a row, not deploying code.
-const { rows: scheduled } = await pool.query(`select id, schedule from ops.agents where enabled and schedule is not null`);
+const { rows: scheduled } = await pool.query(`select id, schedule, timezone from ops.agents where enabled and schedule is not null`);
 if (process.env.DISABLE_SCHEDULES !== '1') {
   await DBOS.applySchedules(
     scheduled.map((a) => ({
@@ -77,6 +79,7 @@ if (process.env.DISABLE_SCHEDULES !== '1') {
       workflowFn: scheduledAgentRun,
       schedule: a.schedule,
       context: { agentId: a.id },
+      cronTimezone: a.timezone, // IANA zone: "8 PM" stays 8 PM local across DST
       queueName: AGENT_QUEUE,
     })),
   );
@@ -198,13 +201,68 @@ const server = http.createServer(async (req, res) => {
       const out = parts[2] === 'approve' ? await approveAndEnqueue(parts[1], by) : await reject(parts[1], by);
       return send(res, out.ok ? 200 : 409, out);
     }
+    // Briefs. GET /briefs/:date (YYYY-MM-DD) or /briefs/:uuid; ?agent= defaults to calendar-prep.
+    if (req.method === 'GET' && url.pathname === '/briefs') {
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 14) || 14, 100);
+      const { rows } = await pool.query(
+        `select id, agent_id, brief_date::text, headline, jsonb_array_length(items) as item_count, mirror_status, seen_at, updated_at
+           from ops.briefs order by brief_date desc, agent_id limit $1`, [limit]);
+      return send(res, 200, rows);
+    }
+    if (req.method === 'GET' && parts[0] === 'briefs' && parts[1] && !parts[2]) {
+      const key = decodeURIComponent(parts[1]);
+      const byDate = /^\d{4}-\d{2}-\d{2}$/.test(key);
+      if (!byDate && !/^[0-9a-f-]{36}$/.test(key)) return send(res, 400, { error: 'expected YYYY-MM-DD or brief id' });
+      const { rows } = await pool.query(
+        `select b.*, b.brief_date::text as brief_date,
+                coalesce((select jsonb_object_agg(d.event_id, jsonb_build_object('content', d.content, 'workflowId', d.workflow_id))
+                            from ops.brief_deeper d where d.brief_id = b.id), '{}') as deeper,
+                coalesce((select jsonb_object_agg(f.event_id, f.verdict) from ops.brief_feedback f where f.brief_id = b.id), '{}') as feedback
+           from ops.briefs b
+          where ${byDate ? `b.brief_date = $1::date and b.agent_id = $2` : `b.id = $1::uuid`}`,
+        byDate ? [key, url.searchParams.get('agent') ?? 'calendar-prep'] : [key],
+      );
+      return rows[0] ? send(res, 200, rows[0]) : send(res, 404, { error: 'no brief' });
+    }
+    if (req.method === 'POST' && parts[0] === 'briefs' && parts[1] && parts[2] === 'seen' && !parts[3]) {
+      const { rowCount } = await pool.query(`update ops.briefs set seen_at = coalesce(seen_at, now()) where id = $1::uuid`, [parts[1]]);
+      return send(res, rowCount ? 200 : 404, { ok: Boolean(rowCount) });
+    }
+    // POST /briefs/:id/items/:eventId/deeper | /feedback {verdict}
+    if (req.method === 'POST' && parts[0] === 'briefs' && parts[1] && parts[2] === 'items' && parts[3] && ['deeper', 'feedback'].includes(parts[4] ?? '')) {
+      const briefId = parts[1];
+      const eventId = decodeURIComponent(parts[3]);
+      if (!/^[0-9a-f-]{36}$/.test(briefId)) return send(res, 400, { error: 'bad brief id' });
+      const { rows } = await pool.query(
+        `select (select value->>'title' from jsonb_array_elements(items) where value->>'eventId' = $2) as title from ops.briefs where id = $1::uuid`,
+        [briefId, eventId],
+      );
+      if (!rows[0]?.title) return send(res, 404, { error: 'no such brief item' });
+      if (parts[4] === 'deeper') {
+        // One deeper pass per item: asking twice returns the same workflow.
+        const workflowID = `deeper-${briefId}-${eventId}`;
+        await DBOS.startWorkflow(deeperPrep, { workflowID, queueName: AGENT_QUEUE })(briefId, eventId);
+        return send(res, 202, { workflowID });
+      }
+      const verdict = String((await readJson(req)).verdict ?? '');
+      if (!['useful', 'not_useful', 'dismissed'].includes(verdict)) return send(res, 400, { error: 'verdict must be useful | not_useful | dismissed' });
+      await pool.query(
+        `insert into ops.brief_feedback (brief_id, event_id, verdict, title) values ($1, $2, $3, $4)
+         on conflict (brief_id, event_id) do update set verdict = excluded.verdict, created_at = now()`,
+        [briefId, eventId, verdict, rows[0].title],
+      );
+      return send(res, 200, { ok: true, verdict });
+    }
     // Manual and webhook triggers: thin handlers that start a workflow with a deterministic ID,
     // so a retried request (same requestId/eventId) maps onto the same run instead of a new one.
     if (req.method === 'POST' && parts[0] === 'agents' && parts[1] && parts[2] === 'run') {
-      const requestId = String((await readJson(req)).requestId ?? '');
+      const body = await readJson(req);
+      const requestId = String(body.requestId ?? '');
       if (!requestId) return send(res, 400, { error: 'requestId required' });
+      const forDate = body.date === undefined ? undefined : String(body.date);
+      if (forDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(forDate)) return send(res, 400, { error: 'date must be YYYY-MM-DD' });
       const workflowID = `manual-${parts[1]}-${requestId}`;
-      await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'manual', sourceEvent: requestId });
+      await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'manual', sourceEvent: requestId, ...(forDate ? { forDate } : {}) });
       return send(res, 202, { workflowID });
     }
     if (req.method === 'POST' && parts[0] === 'webhooks' && parts[1]) {

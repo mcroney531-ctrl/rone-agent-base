@@ -125,6 +125,13 @@ export async function checkGoogleConnection(connectionId: string): Promise<{ ok:
   }
 }
 
+export class CalendarApiError extends OpsError {
+  constructor(errorClass: OpsError['errorClass'], public readonly status: number, message: string) {
+    super(errorClass, message);
+  }
+}
+const isStatus = (e: unknown, ...codes: number[]) => e instanceof CalendarApiError && codes.includes(e.status);
+
 export async function calendarFetch<T>(connectionId: string, path: string, init: RequestInit = {}): Promise<T> {
   const call = async (token: string) =>
     fetch(`${cfg().calendarBase}${path}`, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
@@ -132,7 +139,7 @@ export async function calendarFetch<T>(connectionId: string, path: string, init:
   if (res.status === 401) res = await call(await googleAccessToken(connectionId, { forceRefresh: true }));
   if (!res.ok) {
     const cls = res.status === 401 || res.status === 403 ? 'provider_auth' : res.status === 429 || res.status >= 500 ? 'provider_unavailable' : 'validation';
-    throw new OpsError(cls, `Calendar API ${init.method ?? 'GET'} ${path} → ${res.status}`);
+    throw new CalendarApiError(cls, res.status, `Calendar API ${init.method ?? 'GET'} ${path} → ${res.status}`);
   }
   return (res.status === 204 ? undefined : await res.json()) as T;
 }
@@ -148,7 +155,7 @@ export async function ensureAgentOpsCalendar(connectionId: string): Promise<{ ca
       await calendarFetch(connectionId, `/calendars/${encodeURIComponent(known)}`);
       return { calendarId: known, created: false };
     } catch (e) {
-      if (!(e instanceof OpsError) || !/→ 404/.test(e.message)) throw e;
+      if (!isStatus(e, 404)) throw e;
     }
   }
   // Adopt an existing Agent Ops calendar we own before creating one, so lost metadata never duplicates it.
@@ -176,12 +183,67 @@ export type CalendarEvent = {
   location?: string;
   start: { dateTime?: string; date?: string; timeZone?: string };
   end: { dateTime?: string; date?: string };
-  attendees?: { email: string; responseStatus?: string; self?: boolean }[];
+  attendees?: { email: string; responseStatus?: string; self?: boolean; organizer?: boolean; resource?: boolean }[];
+  organizer?: { email?: string; self?: boolean };
+  recurringEventId?: string;
+  eventType?: string;                 // default | focusTime | outOfOffice | workingLocation | birthday | fromGmail
+  attachments?: { fileUrl?: string; title?: string }[];
+  hangoutLink?: string;
+  htmlLink?: string;
   status?: string;
 };
 
-export async function listEvents(connectionId: string, calendarId: string, timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
-  const q = new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100' });
+export async function getEvent(connectionId: string, calendarId: string, eventId: string): Promise<CalendarEvent> {
+  return calendarFetch<CalendarEvent>(connectionId, `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`);
+}
+
+// Writes go only to calendars this app created (calendar.app.created). Event IDs are chosen by us and
+// deterministic, so the ID itself is the provider-side idempotency key: a retried write can't duplicate.
+type EventBody = Omit<CalendarEvent, 'id'>;
+const eventPath = (calendarId: string, eventId?: string) =>
+  `/calendars/${encodeURIComponent(calendarId)}/events${eventId ? `/${encodeURIComponent(eventId)}` : ''}`;
+
+// Create-or-replace (the brief mirror). PUT also revives an event the user deleted (Google keeps the ID).
+export async function upsertEvent(connectionId: string, calendarId: string, eventId: string, body: EventBody): Promise<{ id: string; created: boolean }> {
+  const full = { ...body, status: 'confirmed' };
+  try {
+    await calendarFetch(connectionId, eventPath(calendarId, eventId), { method: 'PUT', body: JSON.stringify(full) });
+    return { id: eventId, created: false };
+  } catch (e) {
+    if (!isStatus(e, 404)) throw e;
+  }
+  try {
+    await calendarFetch(connectionId, eventPath(calendarId), { method: 'POST', body: JSON.stringify({ ...full, id: eventId }) });
+    return { id: eventId, created: true };
+  } catch (e) {
+    if (!isStatus(e, 409)) throw e; // lost a race with a concurrent insert: replace it instead
+    await calendarFetch(connectionId, eventPath(calendarId, eventId), { method: 'PUT', body: JSON.stringify(full) });
+    return { id: eventId, created: false };
+  }
+}
+
+// Create once (holds). A second attempt with the same ID returns the existing event untouched.
+export async function insertEventOnce(connectionId: string, calendarId: string, eventId: string, body: EventBody): Promise<{ id: string; created: boolean; htmlLink?: string }> {
+  try {
+    const ev = await calendarFetch<CalendarEvent>(connectionId, eventPath(calendarId), { method: 'POST', body: JSON.stringify({ ...body, id: eventId }) });
+    return { id: eventId, created: true, htmlLink: ev?.htmlLink };
+  } catch (e) {
+    if (!isStatus(e, 409)) throw e;
+    const ev = await getEvent(connectionId, calendarId, eventId);
+    return { id: eventId, created: false, htmlLink: ev.htmlLink };
+  }
+}
+
+export async function deleteEvent(connectionId: string, calendarId: string, eventId: string): Promise<void> {
+  try {
+    await calendarFetch(connectionId, eventPath(calendarId, eventId), { method: 'DELETE' });
+  } catch (e) {
+    if (!isStatus(e, 404, 410)) throw e; // already gone
+  }
+}
+
+export async function listEvents(connectionId: string, calendarId: string, timeMin: string, timeMax: string, timeZone?: string): Promise<CalendarEvent[]> {
+  const q = new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100', ...(timeZone ? { timeZone } : {}) });
   const r = await calendarFetch<{ items?: CalendarEvent[] }>(connectionId, `/calendars/${encodeURIComponent(calendarId)}/events?${q}`);
   return (r.items ?? []).filter((e) => e.status !== 'cancelled');
 }

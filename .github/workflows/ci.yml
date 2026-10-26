@@ -85,6 +85,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-connections.ts
 
+      - name: Calendar Prep end to end (fake Google + scripted model)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-calendar-prep.ts
+
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4
