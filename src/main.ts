@@ -106,6 +106,14 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split('/').filter(Boolean);
     // Unauthenticated liveness for the platform healthcheck: says nothing beyond "this process serves".
     if (req.method === 'GET' && url.pathname === '/livez') return send(res, 200, { ok: true, executor: EXECUTOR_ID });
+    // Public home + privacy pages: Google requires them to publish the OAuth app to Production.
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) {
+      const body = url.pathname === '/'
+        ? '<h1>Rone Agent Base</h1><p>A private automation service for one person. It reads that person\'s Google Calendar, with their consent, to prepare briefs and propose reminders on a separate "Agent Ops" calendar. There is no public sign-up.</p><p><a href="/privacy">Privacy</a></p>'
+        : '<h1>Privacy</h1><p>This service is used only by its owner. With the owner\'s consent it reads their Google Calendar events (read-only) and creates or edits events only on calendars it created itself.</p><p>Calendar data is used solely to produce the owner\'s own briefs and reminders. It is not sold, shared, or used for advertising or model training. OAuth credentials are stored encrypted. Access can be revoked at any time from the Google account\'s security settings (Third-party connections).</p><p>Use of Google user data complies with the Google API Services User Data Policy, including the Limited Use requirements.</p>';
+      return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end(`<!doctype html><meta name="viewport" content="width=device-width"><title>Rone Agent Base</title><div style="font:16px/1.5 system-ui;max-width:640px;margin:32px auto;padding:0 16px">${body}</div>`);
+    }
     // OAuth redirect target: necessarily public (the browser lands here from Google). It trusts only a
     // single-use, unexpired `state` minted by an authenticated POST /connections/google.
     if (req.method === 'GET' && url.pathname === '/oauth/google/callback') {
