@@ -12,15 +12,18 @@ import { pool } from './db.js';
 import { agentModel } from './model.js';
 import { classify, OpsError } from './errors.js';
 import { FAKE_PROVIDER_URL } from './config.js';
+import { calendarPrepRun, createAgentOpsHold } from './calendarPrep.js';
 
 export const EXECUTOR_QUEUE = 'executor';
 export const AGENT_QUEUE = 'agent_runs';
 
-export type Trigger = { type: 'schedule' | 'manual' | 'webhook' | 'calendar'; sourceEvent: string };
+// forDate (YYYY-MM-DD): Run Now for a specific local day; only date-scoped handlers read it.
+export type Trigger = { type: 'schedule' | 'manual' | 'webhook' | 'calendar'; sourceEvent: string; forDate?: string };
 
-type AgentRow = {
+export type AgentRow = {
   id: string;
   model: string;
+  timezone: string;
   instructions: string;
   mcp_server_url: string | null;
   approval_policy: { mode: 'auto' | 'pending_approval' | 'risk_threshold'; auto_at_or_below?: 'low' | 'medium' | 'high' };
@@ -49,7 +52,7 @@ const RISK_RANK = { low: 0, medium: 1, high: 2 } as const;
 
 async function loadAgent(agentId: string): Promise<AgentRow> {
   const { rows } = await pool.query(
-    `select a.id, a.model, a.instructions, a.mcp_server_url, a.approval_policy, a.handler,
+    `select a.id, a.model, a.timezone, a.instructions, a.mcp_server_url, a.approval_policy, a.handler,
             coalesce(array_agg(c.id) filter (where ac.required and c.status <> 'active'), '{}') as blocked_connections
        from ops.agents a
        left join ops.agent_connections ac on ac.agent_id = a.id
@@ -62,7 +65,7 @@ async function loadAgent(agentId: string): Promise<AgentRow> {
   return rows[0];
 }
 
-async function recordRunStart(r: { workflowId: string; kind: 'agent_run' | 'executor'; agentId: string; trigger: string; sourceEvent?: string; actionId?: string }) {
+export async function recordRunStart(r: { workflowId: string; kind: 'agent_run' | 'executor'; agentId: string; trigger: string; sourceEvent?: string; actionId?: string }) {
   await pool.query(
     `insert into ops.runs (workflow_id, kind, agent_id, trigger_type, source_event, action_id)
      values ($1, $2, $3, $4, $5, $6) on conflict (workflow_id) do nothing`,
@@ -70,7 +73,7 @@ async function recordRunStart(r: { workflowId: string; kind: 'agent_run' | 'exec
   );
 }
 
-async function recordRunEnd(workflowId: string, outcome: 'succeeded' | 'failed', extra: { errorClass?: string; errorMessage?: string; actionsProposed?: number }) {
+export async function recordRunEnd(workflowId: string, outcome: 'succeeded' | 'failed', extra: { errorClass?: string; errorMessage?: string; actionsProposed?: number }) {
   await pool.query(
     `update ops.runs set finished_at = now(), outcome = $2, error_class = $3, error_message = $4, actions_proposed = $5
       where workflow_id = $1`,
@@ -90,7 +93,13 @@ async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: 
     if (agent.blocked_connections.length) {
       throw new OpsError('connection_unavailable', `required connection(s) not active: ${agent.blocked_connections.join(', ')}`);
     }
-    if (agent.handler) throw new OpsError('validation', `custom handler "${agent.handler}" not implemented in spike`);
+    // Custom handlers branch on the checkpointed agent row, so a replay takes the same path.
+    if (agent.handler === 'calendar_prep') {
+      const out = await calendarPrepRun(agent, trigger, workflowId);
+      await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: out.proposed }), { name: 'recordRunEnd' });
+      return out;
+    }
+    if (agent.handler) throw new OpsError('validation', `unknown handler "${agent.handler}"`);
 
     const ourTools = durableTools({
       read_state: tool({
@@ -150,7 +159,15 @@ async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: 
 // Runs inside a durable tool step: at-least-once. The unique idempotency_key makes a replay a no-op.
 async function proposeAction(agent: AgentRow, sourceWorkflowId: string, proposal: Proposal) {
   const { action, target, ...payload } = proposal;
-  const idempotencyKey = `${agent.id}:${action}:${target}:${sourceWorkflowId}`;
+  return insertAction(agent, sourceWorkflowId, { action, target, payload, idempotencyKey: `${agent.id}:${action}:${target}:${sourceWorkflowId}` });
+}
+
+// Shared by every proposer: insert-once by idempotency key, then apply the agent's approval policy.
+export async function insertAction(
+  agent: Pick<AgentRow, 'id' | 'approval_policy'>, sourceWorkflowId: string,
+  a: { action: string; target: string; payload: Record<string, unknown>; idempotencyKey: string },
+) {
+  const { action, target, payload, idempotencyKey } = a;
   const { rows } = await pool.query(
     `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
      select $1, $2, $3, $4, $5, t.default_risk, $6 from ops.tools t where t.name = $3
@@ -263,7 +280,9 @@ async function executeActionBody(actionId: string) {
   }
 }
 
-async function callProvider(action: { idempotency_key: string; logical_action: string; target: string; payload: unknown }) {
+async function callProvider(action: { idempotency_key: string; logical_action: string; target: string; payload: Record<string, unknown> }) {
+  // Real providers dispatch by logical action inside the same step, so the step sequence is unchanged.
+  if (action.logical_action === 'agentops.hold') return createAgentOpsHold(action);
   const res = await fetch(`${FAKE_PROVIDER_URL}/effects`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'idempotency-key': action.idempotency_key },

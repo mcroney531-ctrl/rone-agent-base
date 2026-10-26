@@ -97,9 +97,18 @@ const G = {
   refresh: new Map<string, { revoked: boolean; scope: string }>(),
   access: new Set<string>(),
   calendars: new Map<string, { id: string; summary: string }>(),
-  events: [] as Record<string, unknown>[],
-  stats: { authCodes: 0, refreshes: 0, calendarsCreated: 0 },
+  events: [] as Record<string, unknown>[],                                   // the user's primary calendar (read-only to us)
+  appEvents: new Map<string, Map<string, Record<string, unknown>>>(),       // events on app-created calendars
+  stats: { authCodes: 0, refreshes: 0, calendarsCreated: 0, eventsInserted: 0, eventsUpdated: 0, eventsDeleted: 0, primaryWrites: 0 },
 };
+const freshStats = () => ({ authCodes: 0, refreshes: 0, calendarsCreated: 0, eventsInserted: 0, eventsUpdated: 0, eventsDeleted: 0, primaryWrites: 0 });
+
+// Overlap test like Google's timeMin/timeMax (all-day events compare by date at UTC midnight: close enough here).
+function inWindow(e: Record<string, any>, timeMin?: string | null, timeMax?: string | null) {
+  const start = Date.parse(e.start?.dateTime ?? e.start?.date);
+  const end = Date.parse(e.end?.dateTime ?? e.end?.date);
+  return (!timeMax || start < Date.parse(timeMax)) && (!timeMin || end > Date.parse(timeMin));
+}
 
 async function readForm(req: http.IncomingMessage): Promise<URLSearchParams> {
   const chunks: Buffer[] = [];
@@ -151,7 +160,14 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
     G.access.clear();
     return send(res, 200, { revoked: G.refresh.size }), true;
   }
-  if (p === '/google/admin/state') return send(res, 200, { ...G.stats, calendars: [...G.calendars.values()] }), true;
+  if (p === '/google/admin/state') {
+    const appEvents = Object.fromEntries([...G.appEvents].map(([cal, evs]) => [cal, [...evs.values()]]));
+    return send(res, 200, { ...G.stats, calendars: [...G.calendars.values()], appEvents }), true;
+  }
+  if (p === '/google/admin/reset' && req.method === 'POST') {
+    G.calendars.clear(); G.appEvents.clear(); G.events = []; G.stats = freshStats();
+    return send(res, 200, { ok: true }), true;
+  }
   if (p === '/google/admin/events' && req.method === 'POST') {
     G.events = ((await readBody(req)) as Record<string, unknown>[]) ?? [];
     return send(res, 200, { events: G.events.length }), true;
@@ -163,13 +179,15 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
   if (p === '/google/calendar/v3/users/me/calendarList') {
     return send(res, 200, { items: [...G.calendars.values()].map((c) => ({ ...c, accessRole: 'owner' })) }), true;
   }
-  const m = /^\/google\/calendar\/v3\/calendars(?:\/([^/]+))?(\/events)?$/.exec(p);
+  const m = /^\/google\/calendar\/v3\/calendars(?:\/([^/]+))?(\/events)?(?:\/([^/]+))?$/.exec(p);
   if (!m) return send(res, 404, { error: { code: 404 } }), true;
   const calId = m[1] ? decodeURIComponent(m[1]) : undefined;
+  const eventId = m[3] ? decodeURIComponent(m[3]) : undefined;
   if (!calId && req.method === 'POST') {
     const body = (await readBody(req)) as { summary: string };
     const cal = { id: `${randomUUID()}@group.calendar.google.com`, summary: body.summary };
     G.calendars.set(cal.id, cal);
+    G.appEvents.set(cal.id, new Map());
     G.stats.calendarsCreated++;
     return send(res, 200, cal), true;
   }
@@ -177,7 +195,47 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
     const cal = G.calendars.get(calId);
     return send(res, cal ? 200 : 404, cal ?? { error: { code: 404 } }), true;
   }
-  if (calId && m[2] && req.method === 'GET') return send(res, 200, { items: calId === 'primary' ? G.events : [] }), true;
+  if (!calId) return send(res, 404, { error: { code: 404 } }), true;
+
+  if (calId === 'primary') {
+    // calendar.readonly: any write to the primary calendar is a scope violation.
+    if (req.method !== 'GET') return G.stats.primaryWrites++, send(res, 403, { error: { code: 403, message: 'Insufficient Permission' } }), true;
+    if (eventId) {
+      const ev = G.events.find((e) => e.id === eventId);
+      return send(res, ev ? 200 : 404, ev ?? { error: { code: 404 } }), true;
+    }
+    return send(res, 200, { items: G.events.filter((e) => inWindow(e, u.searchParams.get('timeMin'), u.searchParams.get('timeMax'))) }), true;
+  }
+
+  const evs = G.appEvents.get(calId);
+  if (!evs) return send(res, 404, { error: { code: 404 } }), true;
+  if (!eventId && req.method === 'GET') return send(res, 200, { items: [...evs.values()].filter((e) => e.status !== 'cancelled') }), true;
+  if (!eventId && req.method === 'POST') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const id = String(body.id ?? randomUUID().replace(/-/g, ''));
+    if (!/^[a-v0-9]{5,1024}$/.test(id)) return send(res, 400, { error: { code: 400, message: 'Invalid resource id value.' } }), true;
+    if (evs.has(id)) return send(res, 409, { error: { code: 409, message: 'The requested identifier already exists.' } }), true;
+    const ev = { ...body, id, status: body.status ?? 'confirmed', htmlLink: `https://calendar.example/event?eid=${id}` };
+    evs.set(id, ev);
+    G.stats.eventsInserted++;
+    return send(res, 200, ev), true;
+  }
+  const cur = eventId ? evs.get(eventId) : undefined;
+  if (req.method === 'GET') return send(res, cur ? 200 : 404, cur ?? { error: { code: 404 } }), true;
+  if (req.method === 'PUT') {
+    if (!cur) return send(res, 404, { error: { code: 404 } }), true;
+    const ev = { ...(await readBody(req) as Record<string, unknown>), id: eventId, htmlLink: cur.htmlLink };
+    evs.set(eventId!, ev);
+    G.stats.eventsUpdated++;
+    return send(res, 200, ev), true;
+  }
+  if (req.method === 'DELETE') {
+    if (!cur) return send(res, 404, { error: { code: 404 } }), true;
+    if (cur.status === 'cancelled') return send(res, 410, { error: { code: 410, message: 'Resource has been deleted' } }), true;
+    cur.status = 'cancelled'; // Google keeps the ID; a later PUT revives it
+    G.stats.eventsDeleted++;
+    return res.writeHead(204).end(), true;
+  }
   return send(res, 404, { error: { code: 404 } }), true;
 }
 

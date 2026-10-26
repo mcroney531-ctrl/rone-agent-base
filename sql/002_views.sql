@@ -146,5 +146,17 @@ select 'connection_problem', c.id, min(ac.agent_id), coalesce(c.last_checked_at,
  where c.status not in ('active', 'pending')
  group by c.id, c.last_checked_at, c.updated_at, c.status, c.account_label, c.last_error
 union all
+-- Briefs: tomorrow's (or today's) brief until it's been opened, and any brief whose calendar mirror failed.
+select 'brief_ready', b.id::text, b.agent_id, b.updated_at,
+       b.brief_date::text || ': ' || coalesce(b.headline, '') || ' (' || jsonb_array_length(b.items) || ' to prep)'
+  from ops.briefs b
+ where b.seen_at is null and jsonb_array_length(b.items) > 0
+   and b.brief_date >= (now() at time zone b.timezone)::date
+union all
+select 'brief_mirror_failed', b.id::text, b.agent_id, b.updated_at,
+       'Agent Ops mirror for ' || b.brief_date::text || ' not written: ' || coalesce(b.mirror_error, '?')
+  from ops.briefs b
+ where b.mirror_status = 'failed' and b.brief_date >= (now() at time zone b.timezone)::date
+union all
 select 'executor_unreaped', e.executor_id, null, e.last_seen_at, 'stale heartbeat, not yet reaped — is any worker alive?'
   from ops.executors e where e.reaped_at is null and e.last_seen_at < now() - interval '2 minutes';
