@@ -29,9 +29,21 @@ const applySql = (file: string) =>
 
 if (!process.env.API_TOKEN && process.env.RAILWAY_ENVIRONMENT) throw new Error('API_TOKEN must be set when deployed: the API can approve external actions');
 const APP_HTML = fs.readFileSync(new URL('../public/app.html', import.meta.url), 'utf8');
+// Installable PWA: separate `any` and `maskable` icons (never "any maskable" on one entry: that combination
+// can make Android fall back to a Chrome shortcut), scope /app/ with a service worker registered there.
 const APP_MANIFEST = JSON.stringify({
-  name: 'Agent Ops', short_name: 'Agent Ops', start_url: '/app#/', display: 'standalone', background_color: '#f6f6f4', theme_color: '#f6f6f4',
+  id: '/app/', name: 'Agent Ops', short_name: 'Agent Ops', start_url: '/app/#/', scope: '/app/', display: 'standalone',
+  background_color: '#f6f6f4', theme_color: '#2f5bd3',
+  icons: [
+    { src: '/app/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: '/app/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: '/app/icons/maskable-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+    { src: '/app/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+  ],
 });
+const APP_SW = fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
+const APP_ICONS = new Map(fs.readdirSync(new URL('../public/icons/', import.meta.url))
+  .filter((f) => f.endsWith('.png')).map((f) => [f, fs.readFileSync(new URL(`../public/icons/${f}`, import.meta.url))]));
 
 await applySql('001_ops_schema.sql');
 await applySql('003_connections.sql');
@@ -136,10 +148,19 @@ const server = http.createServer(async (req, res) => {
       }
     }
     // The phone app shell is public (it holds no data); every call it makes is authenticated below.
-    if (req.method === 'GET' && (url.pathname === '/app' || url.pathname === '/app/')) {
+    // /app → /app/ so the page sits inside the service worker's scope. The browser keeps the #fragment
+    // across the redirect, so magic-link tokens survive it.
+    if (req.method === 'GET' && url.pathname === '/app') return res.writeHead(302, { location: `/app/${url.search}` }).end();
+    if (req.method === 'GET' && url.pathname === '/app/') {
       return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', 'referrer-policy': 'no-referrer' }).end(APP_HTML);
     }
     if (req.method === 'GET' && url.pathname === '/app/config') return send(res, 200, publicAuthConfig());
+    if (req.method === 'GET' && url.pathname === '/app/sw.js') {
+      return res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' }).end(APP_SW);
+    }
+    if (req.method === 'GET' && parts[0] === 'app' && parts[1] === 'icons' && APP_ICONS.has(parts[2] ?? '')) {
+      return res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' }).end(APP_ICONS.get(parts[2]!));
+    }
     if (req.method === 'GET' && url.pathname === '/app/manifest.webmanifest') {
       return res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(APP_MANIFEST);
     }

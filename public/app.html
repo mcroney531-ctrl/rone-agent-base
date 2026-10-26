@@ -9,6 +9,8 @@
 <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="/app/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/app/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/app/icons/apple-touch-icon.png">
 <title>Agent Ops</title>
 <style>
   :root {
@@ -56,7 +58,8 @@
   .toast { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 600px;
            background: var(--ink); color: var(--bg); padding: 12px 14px; border-radius: 12px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
-  input[type=email] { width: 100%; font: inherit; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 8px 0 12px; }
+  /* ≥16px on focusable inputs, or iOS Safari zooms the page on focus and never zooms back. */
+  input[type=email] { width: 100%; font: inherit; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 8px 0 12px; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .muted { color: var(--muted); font-size: 14px; }
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
@@ -135,7 +138,7 @@ async function api(path, opts = {}) {
 // ---------- screens ----------
 function loginScreen(note) {
   document.getElementById('tabs').hidden = true;
-  const email = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email', required: true });
+  const email = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email', enterkeyhint: 'go', required: true });
   const btn = h('button', { class: 'primary', type: 'submit' }, 'Email me a sign-in link');
   const form = h('form', { onsubmit: async (e) => {
     e.preventDefault();
@@ -278,9 +281,11 @@ if (sb) {
   sb.auth.onAuthStateChange((_event, s) => { const was = Boolean(session); session = s; if (was !== Boolean(s)) route(); });
 }
 addEventListener('hashchange', route);
+// Installability (Android WebAPK) needs an active service worker for the app's scope.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/sw.js', { scope: '/app/' }).catch((e) => console.warn('sw', e));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && session) route(); });
 // The magic link lands with tokens in the URL fragment; supabase-js consumes them, then start on Needs You.
-if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app#/');
+if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app/#/');
 route();
 </script>
 </body>
