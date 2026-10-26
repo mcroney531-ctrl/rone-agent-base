@@ -19,16 +19,14 @@ async function consent(authUrl: string): Promise<{ status: number; body: string;
 }
 
 const { url, db } = await freshDb('spike_conn');
-const w = await startWorker({
-  id: 'conn-1', port: PORT, dbUrl: url,
-  env: {
+const workerEnv = {
     CONNECTION_KEY: randomBytes(32).toString('base64'),
     GOOGLE_CLIENT_ID: 'test-client', GOOGLE_CLIENT_SECRET: 'test-secret',
     GOOGLE_REDIRECT_URI: `http://127.0.0.1:${PORT}/oauth/google/callback`,
     GOOGLE_AUTH_URL: `${EXTERNALS}/google/auth`, GOOGLE_TOKEN_URL: `${EXTERNALS}/google/token`,
     GOOGLE_USERINFO_URL: `${EXTERNALS}/google/userinfo`, GOOGLE_CALENDAR_BASE: `${EXTERNALS}/google/calendar/v3`,
-  },
-});
+};
+const w = await startWorker({ id: 'conn-1', port: PORT, dbUrl: url, env: workerEnv });
 
 try {
   const start = await w.http('POST', '/connections/google', { id: 'google:primary' });
@@ -57,13 +55,16 @@ try {
   const forged = await fetch(`http://127.0.0.1:${PORT}/oauth/google/callback?code=x&state=forged`);
   check('forged state is rejected', forged.status === 400, forged.status);
 
+  const auto = await one(db, `select metadata->>'agentOpsCalendarId' as cal from ops.connections where id = 'google:primary'`);
+  check('Agent Ops calendar created automatically right after consent', Boolean(auto?.cal), auto);
+
   const health = await w.http('POST', '/connections/google:primary/check');
   check('health check refreshes the token', health.body.ok === true, health.body);
 
   const cal1 = await w.http('POST', '/connections/google:primary/agent-ops-calendar');
   const cal2 = await w.http('POST', '/connections/google:primary/agent-ops-calendar');
   const gstate = await (await fetch(`${EXTERNALS}/google/admin/state`)).json();
-  check('Agent Ops calendar created once, reused after', cal1.body.created === true && cal2.body.created === false
+  check('Agent Ops calendar created once, reused after', cal1.body.created === false && cal2.body.created === false && cal1.body.calendarId === auto.cal
     && cal1.body.calendarId === cal2.body.calendarId && gstate.calendarsCreated === 1, { cal1: cal1.body, cal2: cal2.body, gstate });
 
   await fetch(`${EXTERNALS}/google/admin/revoke`, { method: 'POST' });
@@ -85,7 +86,20 @@ try {
   const cal3 = await w.http('POST', '/connections/google:primary/agent-ops-calendar');
   check('Agent Ops calendar survives re-auth (no duplicate)', cal3.body.created === false && cal3.body.calendarId === cal1.body.calendarId, cal3.body);
 
-  const bad = await w.http('POST', '/connections/google', { id: 'not-google' });
+  // Boot path: metadata lost, worker restarts → it adopts the existing calendar instead of creating a second one.
+  await db.query(`update ops.connections set metadata = metadata - 'agentOpsCalendarId' where id = 'google:primary'`);
+  const before = (await (await fetch(`${EXTERNALS}/google/admin/state`)).json()).calendarsCreated;
+  await w.kill('SIGTERM');
+  const w2 = await startWorker({ id: 'conn-2', port: PORT, dbUrl: url, env: workerEnv });
+  let adopted: { cal?: string } | undefined;
+  for (let i = 0; i < 50 && !adopted?.cal; i++) {
+    adopted = await one(db, `select metadata->>'agentOpsCalendarId' as cal from ops.connections where id = 'google:primary'`);
+    if (!adopted?.cal) await new Promise((r) => setTimeout(r, 200));
+  }
+  const after = (await (await fetch(`${EXTERNALS}/google/admin/state`)).json()).calendarsCreated;
+  check('worker boot re-adopts the existing Agent Ops calendar (no duplicate)', adopted?.cal === cal1.body.calendarId && after === before, { adopted, before, after });
+
+  const bad = await w2.http('POST', '/connections/google', { id: 'not-google' });
   check('connection ids are validated', bad.status === 400, bad);
 } finally {
   await killAllWorkers();

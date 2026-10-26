@@ -160,6 +160,9 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
   if (!authed) return send(res, 401, { error: { code: 401, message: 'Invalid Credentials' } }), true;
   if (p === '/google/userinfo') return send(res, 200, { email: 'rone@example.com', email_verified: true }), true;
 
+  if (p === '/google/calendar/v3/users/me/calendarList') {
+    return send(res, 200, { items: [...G.calendars.values()].map((c) => ({ ...c, accessRole: 'owner' })) }), true;
+  }
   const m = /^\/google\/calendar\/v3\/calendars(?:\/([^/]+))?(\/events)?$/.exec(p);
   if (!m) return send(res, 404, { error: { code: 404 } }), true;
   const calId = m[1] ? decodeURIComponent(m[1]) : undefined;
