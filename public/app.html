@@ -58,8 +58,9 @@
   .toast { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 600px;
            background: var(--ink); color: var(--bg); padding: 12px 14px; border-radius: 12px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
+  input.code { letter-spacing: .3em; font-variant-numeric: tabular-nums; }
   /* ≥16px on focusable inputs, or iOS Safari zooms the page on focus and never zooms back. */
-  input[type=email] { width: 100%; font: inherit; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 8px 0 12px; }
+  input[type=email], input.code { width: 100%; font: inherit; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 8px 0 12px; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .muted { color: var(--muted); font-size: 14px; }
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
@@ -146,10 +147,31 @@ function loginScreen(note) {
     const { error } = await sb.auth.signInWithOtp({ email: email.value.trim(), options: { emailRedirectTo: `${location.origin}/app`, shouldCreateUser: false } });
     btn.disabled = false;
     if (error) return toast(error.message);
-    render(h('div', { class: 'empty' }, h('b', {}, 'Check your email'), 'Open the link on this phone to sign in.'));
+    codeScreen(email.value.trim());
   } }, email, btn);
   render(h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops')), h('h1', {}, 'Sign in'),
     note ? h('p', { class: 'muted' }, note) : null, form);
+}
+
+// The email carries both a link and a code. The code avoids Gmail's threading (repeat emails collapse,
+// and only the newest link is valid) and works when the email is read on another device.
+function codeScreen(address) {
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', enterkeyhint: 'go',
+    pattern: '[0-9]*', maxlength: '10', placeholder: '123456', required: true, class: 'code' });
+  const btn = h('button', { class: 'primary', type: 'submit' }, 'Sign in');
+  const form = h('form', { onsubmit: async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    const { data, error } = await sb.auth.verifyOtp({ email: address, token: code.value.replace(/\D/g, ''), type: 'email' });
+    btn.disabled = false;
+    if (error) return toast(/expired|invalid/i.test(error.message) ? 'That code is expired or not the newest one. Use the latest email.' : error.message);
+    session = data.session;
+    go('#/');
+  } }, code, btn);
+  render(h('header', { class: 'top' }, h('span', { class: 'brand' }, 'Agent Ops')), h('h1', {}, 'Check your email'),
+    h('p', { class: 'muted' }, `Enter the code sent to ${address}, or tap the link in the newest email.`), form,
+    h('button', { class: 'back', onclick: () => loginScreen() }, 'Use a different email'));
+  code.focus();
 }
 
 function actionButtons(item, after) {
