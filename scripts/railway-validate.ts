@@ -146,4 +146,5 @@ try {
   report({ ok: false, error: (e as Error).message });
 }
 console.log('[validate] phase complete; idling');
-await new Promise(() => undefined);
+// A live timer keeps the event loop busy; a bare never-resolving promise lets Node exit with code 13.
+setInterval(() => undefined, 1 << 30);
