@@ -12,7 +12,8 @@
     "externals": "node --import tsx src/externals.ts",
     "typecheck": "tsc -p .",
     "suite": "tsx scripts/failure-suite.ts",
-    "upgrade-test": "bash scripts/upgrade-test.sh"
+    "upgrade-test": "bash scripts/upgrade-test.sh",
+    "test:connections": "tsx scripts/test-connections.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.88",
