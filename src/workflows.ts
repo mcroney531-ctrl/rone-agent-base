@@ -1,0 +1,286 @@
+// Durable workflows. Read docs/durable-workflows.md first if this is new: the short version is that
+// a workflow function is REPLAYED after a crash, so everything that touches the outside world
+// (DB, network, clock, randomness) must be inside a step, and the code between steps must make the
+// same decisions every time it runs.
+import fs from 'node:fs';
+import { DBOS } from '@dbos-inc/dbos-sdk';
+import { ToolLoopAgent, stepCountIs, tool } from 'ai';
+import { createMCPClient } from '@ai-sdk/mcp';
+import { durableMCPTools, durableTools } from '@dbos-inc/vercel-ai';
+import { z } from 'zod';
+import { pool } from './db.js';
+import { agentModel } from './model.js';
+import { classify, OpsError } from './errors.js';
+import { FAKE_PROVIDER_URL } from './config.js';
+
+export const EXECUTOR_QUEUE = 'executor';
+export const AGENT_QUEUE = 'agent_runs';
+
+export type Trigger = { type: 'schedule' | 'manual' | 'webhook' | 'calendar'; sourceEvent: string };
+
+type AgentRow = {
+  id: string;
+  model: string;
+  instructions: string;
+  mcp_server_url: string | null;
+  approval_policy: { mode: 'auto' | 'pending_approval' | 'risk_threshold'; auto_at_or_below?: 'low' | 'medium' | 'high' };
+  handler: string | null;
+  blocked_connections: string[];
+};
+
+// ---------- strict ACTION schemas: malformed model output is rejected here, never reaches a provider ----------
+
+const email = z.string().email();
+export const ProposalSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('crm.note'), target: email, note: z.string().min(1).max(2000) }).strict(),
+  z.object({
+    action: z.literal('email.draft'), target: email, subject: z.string().min(1).max(200), body: z.string().min(1).max(10_000),
+  }).strict(),
+  z.object({
+    action: z.literal('calendar.hold'), target: email, title: z.string().min(1).max(200),
+    start: z.string().datetime(), durationMinutes: z.number().int().min(5).max(480),
+  }).strict(),
+]);
+export type Proposal = z.infer<typeof ProposalSchema>;
+
+const RISK_RANK = { low: 0, medium: 1, high: 2 } as const;
+
+// ---------- steps (each one is checkpointed in dbos.* after it returns) ----------
+
+async function loadAgent(agentId: string): Promise<AgentRow> {
+  const { rows } = await pool.query(
+    `select a.id, a.model, a.instructions, a.mcp_server_url, a.approval_policy, a.handler,
+            coalesce(array_agg(c.id) filter (where ac.required and c.status <> 'active'), '{}') as blocked_connections
+       from ops.agents a
+       left join ops.agent_connections ac on ac.agent_id = a.id
+       left join ops.connections c on c.id = ac.connection_id
+      where a.id = $1 and a.enabled
+      group by a.id`,
+    [agentId],
+  );
+  if (!rows[0]) throw new OpsError('validation', `agent ${agentId} not found or disabled`);
+  return rows[0];
+}
+
+async function recordRunStart(r: { workflowId: string; kind: 'agent_run' | 'executor'; agentId: string; trigger: string; sourceEvent?: string; actionId?: string }) {
+  await pool.query(
+    `insert into ops.runs (workflow_id, kind, agent_id, trigger_type, source_event, action_id)
+     values ($1, $2, $3, $4, $5, $6) on conflict (workflow_id) do nothing`,
+    [r.workflowId, r.kind, r.agentId, r.trigger, r.sourceEvent ?? null, r.actionId ?? null],
+  );
+}
+
+async function recordRunEnd(workflowId: string, outcome: 'succeeded' | 'failed', extra: { errorClass?: string; errorMessage?: string; actionsProposed?: number }) {
+  await pool.query(
+    `update ops.runs set finished_at = now(), outcome = $2, error_class = $3, error_message = $4, actions_proposed = $5
+      where workflow_id = $1`,
+    [workflowId, outcome, extra.errorClass ?? null, extra.errorMessage ?? null, extra.actionsProposed ?? null],
+  );
+}
+
+// ---------- reasoning workflow: think, propose ACTIONS, end. Never waits for a human (hard rule 1). ----------
+
+async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: string; proposed: number }> {
+  const workflowId = DBOS.workflowID!;
+  await DBOS.runStep(() => recordRunStart({ workflowId, kind: 'agent_run', agentId, trigger: trigger.type, sourceEvent: trigger.sourceEvent }), { name: 'recordRunStart' });
+
+  try {
+    const agent = await DBOS.runStep(() => loadAgent(agentId), { name: 'loadAgent' });
+    // Branching on a step's checkpointed output is deterministic: on replay, `agent` is the same value.
+    if (agent.blocked_connections.length) {
+      throw new OpsError('connection_unavailable', `required connection(s) not active: ${agent.blocked_connections.join(', ')}`);
+    }
+    if (agent.handler) throw new OpsError('validation', `custom handler "${agent.handler}" not implemented in spike`);
+
+    const ourTools = durableTools({
+      read_state: tool({
+        description: 'Read one durable STATE fact for this agent',
+        inputSchema: z.object({ key: z.string().min(1).max(100) }).strict(),
+        execute: async ({ key }) => {
+          const { rows } = await pool.query(`select value, updated_at from ops.state where agent_id = $1 and key = $2`, [agentId, key]);
+          return rows[0] ?? { value: null };
+        },
+      }),
+      write_state: tool({
+        description: 'Write one durable STATE fact for this agent',
+        inputSchema: z.object({ key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()) }).strict(),
+        execute: async ({ key, value }) => {
+          await pool.query(
+            `insert into ops.state (agent_id, key, value, source_workflow_id) values ($1, $2, $3, $4)
+             on conflict (agent_id, key) do update set value = excluded.value, source_workflow_id = excluded.source_workflow_id, updated_at = now()`,
+            [agentId, key, value, workflowId],
+          );
+          return { ok: true };
+        },
+      }),
+      propose_action: tool({
+        description: 'Propose ONE external action. It is not executed now; it is queued for approval.',
+        inputSchema: z.object({ proposal: ProposalSchema }).strict(),
+        execute: async ({ proposal }) => proposeAction(agent, workflowId, proposal),
+      }),
+    });
+
+    const mcpClient = agent.mcp_server_url ? await createMCPClient({ transport: { type: 'http', url: agent.mcp_server_url } }) : undefined;
+    try {
+      const mcpTools = mcpClient ? await durableMCPTools(mcpClient) : {};
+      const runner = new ToolLoopAgent({
+        model: agentModel(agent.model),
+        instructions: agent.instructions,
+        tools: { ...mcpTools, ...ourTools },
+        stopWhen: stepCountIs(10),
+      });
+      const result = await runner.generate({ prompt: `Trigger: ${trigger.type} (${trigger.sourceEvent}). Do your task.` });
+
+      const proposed = await DBOS.runStep(
+        async () => (await pool.query(`select count(*)::int n from ops.actions where source_workflow_id = $1`, [workflowId])).rows[0].n as number,
+        { name: 'countProposed' },
+      );
+      await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: proposed }), { name: 'recordRunEnd' });
+      return { text: result.text, proposed };
+    } finally {
+      await mcpClient?.close();
+    }
+  } catch (err) {
+    const { errorClass, message } = classify(err);
+    await DBOS.runStep(() => recordRunEnd(workflowId, 'failed', { errorClass, errorMessage: message }), { name: 'recordRunFailed' });
+    throw err;
+  }
+}
+
+// Runs inside a durable tool step: at-least-once. The unique idempotency_key makes a replay a no-op.
+async function proposeAction(agent: AgentRow, sourceWorkflowId: string, proposal: Proposal) {
+  const { action, target, ...payload } = proposal;
+  const idempotencyKey = `${agent.id}:${action}:${target}:${sourceWorkflowId}`;
+  const { rows } = await pool.query(
+    `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
+     select $1, $2, $3, $4, $5, t.default_risk, $6 from ops.tools t where t.name = $3
+     on conflict (idempotency_key) do update set updated_at = ops.actions.updated_at
+     returning id, status, risk_level`,
+    [agent.id, sourceWorkflowId, action, target, payload, idempotencyKey],
+  );
+  const row = rows[0];
+  const p = agent.approval_policy;
+  const auto = p.mode === 'auto' || (p.mode === 'risk_threshold' && RISK_RANK[row.risk_level as 'low'] <= RISK_RANK[p.auto_at_or_below ?? 'low']);
+  if (auto && row.status === 'pending_approval') {
+    await approveAndEnqueue(row.id, 'policy:auto');
+    return { actionId: row.id, status: 'approved_by_policy' };
+  }
+  return { actionId: row.id, status: row.status };
+}
+
+export const agentRun = DBOS.registerWorkflow(agentRunBody, { name: 'agentRun' });
+
+// Scheduled entry point. DBOS derives the workflow ID from schedule name + scheduled time
+// (sched-<name>-<ISO>), so each occurrence runs once no matter how many containers are alive.
+export const scheduledAgentRun = DBOS.registerWorkflow(
+  async (scheduledAt: Date, context: { agentId: string }) => {
+    await agentRunBody(context.agentId, { type: 'schedule', sourceEvent: scheduledAt.toISOString() });
+  },
+  { name: 'scheduledAgentRun' },
+);
+
+// ---------- approval → executor ----------
+
+// Set by main.ts once DBOSClient exists. Approval flips the row and enqueues the executor in ONE
+// Postgres transaction, so there is no "approved but executor never started" crash window.
+let enqueueExecutor: ((c: import('pg').ClientBase, actionId: string, idempotencyKey: string) => Promise<void>) | undefined;
+export function setExecutorEnqueuer(fn: typeof enqueueExecutor) {
+  enqueueExecutor = fn;
+}
+
+export async function approveAndEnqueue(actionId: string, decidedBy: string): Promise<{ ok: boolean; status: string }> {
+  const c = await pool.connect();
+  try {
+    await c.query('begin');
+    const { rows } = await c.query(
+      `update ops.actions set status = 'approved', decided_by = $2, decided_at = now(), updated_at = now()
+        where id = $1 and status = 'pending_approval' returning idempotency_key`,
+      [actionId, decidedBy],
+    );
+    if (!rows[0]) {
+      await c.query('rollback');
+      const cur = await pool.query(`select status from ops.actions where id = $1`, [actionId]);
+      return { ok: false, status: cur.rows[0]?.status ?? 'not_found' };
+    }
+    await enqueueExecutor!(c, actionId, rows[0].idempotency_key);
+    await c.query('commit');
+    return { ok: true, status: 'approved' };
+  } catch (e) {
+    await c.query('rollback').catch(() => undefined);
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
+export async function reject(actionId: string, decidedBy: string) {
+  const { rows } = await pool.query(
+    `update ops.actions set status = 'rejected', decided_by = $2, decided_at = now(), updated_at = now()
+      where id = $1 and status = 'pending_approval' returning id`,
+    [actionId, decidedBy],
+  );
+  return { ok: rows.length === 1 };
+}
+
+// Deterministic executor: no LLM. Workflow ID = the action's idempotency key (hard rule 2).
+// DBOS guarantees one logical execution per ID; the provider-side Idempotency-Key (hard rule 3)
+// covers the crash window between "provider accepted" and "our checkpoint was written".
+async function executeActionBody(actionId: string) {
+  const workflowId = DBOS.workflowID!;
+  const action = await DBOS.runStep(
+    async () => (await pool.query(`select * from ops.actions where id = $1`, [actionId])).rows[0],
+    { name: 'loadAction' },
+  );
+  if (!action || action.status !== 'approved') return { skipped: action?.status ?? 'missing' };
+  await DBOS.runStep(() => recordRunStart({ workflowId, kind: 'executor', agentId: action.agent_id, trigger: 'approval', actionId }), { name: 'recordRunStart' });
+
+  // Failure-suite stand-in for "a later deploy inserted a step". Variant 2 is the correct way
+  // (DBOS.patch: executions that already passed this point keep the old step sequence);
+  // variant 2-unpatched is the mistake hard rule 4 exists to prevent.
+  const variant = process.env.SPIKE_CODE_VARIANT ?? '1';
+  if ((variant === '2' && (await DBOS.patch('audit-before-call'))) || variant === '2-unpatched') {
+    await DBOS.runStep(async () => ({ audited: true }), { name: 'auditBeforeCall' });
+  }
+
+  try {
+    const result = await DBOS.runStep(() => callProvider(action), {
+      name: 'callProvider', retriesAllowed: true, maxAttempts: 4, intervalSeconds: 1, backoffRate: 2,
+    });
+    await DBOS.runStep(async () => {
+      const hang = Number(process.env.HANG_IN_MARK_EXECUTED_MS ?? 0);
+      if (hang) await new Promise((r) => setTimeout(r, hang));
+      await pool.query(`update ops.actions set status = 'executed', result = $2, updated_at = now() where id = $1 and status = 'approved'`, [actionId, result]);
+    }, { name: 'markExecuted' });
+    await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', {}), { name: 'recordRunEnd' });
+    return result;
+  } catch (err) {
+    const { errorClass, message } = classify(err);
+    await DBOS.runStep(async () => {
+      await pool.query(`update ops.actions set status = 'failed', error = $2, updated_at = now() where id = $1 and status = 'approved'`, [actionId, `${errorClass}: ${message}`]);
+      await recordRunEnd(workflowId, 'failed', { errorClass, errorMessage: message });
+    }, { name: 'markFailed' });
+    throw err;
+  }
+}
+
+async function callProvider(action: { idempotency_key: string; logical_action: string; target: string; payload: unknown }) {
+  const res = await fetch(`${FAKE_PROVIDER_URL}/effects`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': action.idempotency_key },
+    body: JSON.stringify({ action: action.logical_action, target: action.target, payload: action.payload }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new OpsError(res.status === 401 || res.status === 403 ? 'provider_auth' : 'provider_unavailable', `provider ${res.status}: ${body.error}`);
+
+  // Failure-suite hook: die after the provider committed, before DBOS checkpoints this step.
+  const marker = process.env.CRASH_AFTER_PROVIDER_CALL;
+  if (marker && !fs.existsSync(marker)) {
+    fs.writeFileSync(marker, `${action.idempotency_key}\n`);
+    console.log(`[crash-hook] SIGKILL after provider accepted ${action.idempotency_key}`);
+    process.kill(process.pid, 'SIGKILL');
+    await new Promise(() => undefined);
+  }
+  return body;
+}
+
+export const executeAction = DBOS.registerWorkflow(executeActionBody, { name: 'executeAction' });

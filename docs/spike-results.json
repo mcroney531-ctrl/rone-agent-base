@@ -1,0 +1,632 @@
+{
+  "t1": {
+    "id": "t1",
+    "title": "Kill mid-agent-loop; the restarted process (same replica, NEW executor ID) takes over",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "stateAtKill": {
+        "status": "PENDING",
+        "executor_id": "t1-boot1"
+      },
+      "actionsAtKill": 0,
+      "recoverMs": 8500,
+      "finalState": {
+        "run_state": "succeeded",
+        "recovery_attempts": "1",
+        "executor_id": "t1-boot2"
+      },
+      "executors": [
+        {
+          "executor_id": "t1-boot1",
+          "railway_deployment_id": "dep-1111",
+          "railway_replica_id": "rep-aaaa",
+          "reaped_by": "t1-boot2"
+        },
+        {
+          "executor_id": "t1-boot2",
+          "railway_deployment_id": "dep-1111",
+          "railway_replica_id": "rep-aaaa",
+          "reaped_by": null
+        }
+      ],
+      "actions": 3,
+      "distinctKeys": 3,
+      "runLedgerRows": 1,
+      "modelCallsPerTurn": {
+        "0": 1,
+        "1": 1,
+        "2": 2,
+        "3": 1,
+        "4": 1
+      }
+    },
+    "notes": [
+      "A restart is a new process, so it is a new executor; Railway replica/deployment IDs are recorded as metadata only.",
+      "Takeover is by the heartbeat sweep (DEAD_AFTER_MS), not DBOS launch recovery. Completed model calls (turns 0,1) replayed from checkpoints."
+    ]
+  },
+  "t1b": {
+    "id": "t1b",
+    "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "recoverMsFromKill": 9720,
+      "reaped": {
+        "reaped_by": "t1b-b",
+        "reaped_count": 1
+      },
+      "finalState": {
+        "run_state": "succeeded",
+        "executor_id": "t1b-b",
+        "recovery_attempts": "1"
+      },
+      "actions": 3,
+      "modelCallsPerTurn": {
+        "0": 1,
+        "1": 1,
+        "2": 2,
+        "3": 1,
+        "4": 1
+      }
+    },
+    "notes": [
+      "DBOS alone would NOT recover this: launch recovery only reclaims PENDING rows for its own executor ID.",
+      "Adapter = ops.executors heartbeat + atomic reap + public DBOS.resumeWorkflows() (same workflow ID, checkpoints kept).",
+      "Recovery latency ≈ DEAD_AFTER_MS (5s in suite) + sweep interval."
+    ]
+  },
+  "t2": {
+    "id": "t2",
+    "title": "Kill executor after external call, before local checkpoint",
+    "classification": "PASS",
+    "metrics": {
+      "crashExit": 128,
+      "providerAtCrash": {
+        "attempts": 2,
+        "n": 2,
+        "committed": 2,
+        "deduped": 0,
+        "faults": 0,
+        "uniqueEffects": 2
+      },
+      "providerFinal": {
+        "attempts": 4,
+        "n": 4,
+        "committed": 2,
+        "deduped": 2,
+        "faults": 0,
+        "uniqueEffects": 2
+      },
+      "requestAttemptsVsUniqueEffects": "4 attempts → 2 committed effects (2 deduplicated by provider)",
+      "approvals": {
+        "approve1": 200,
+        "approve2": 200,
+        "reject": 200,
+        "reapproveAfterExecuted": 409
+      },
+      "executorWorkflows": [
+        {
+          "workflow_id": "spike-agent:calendar.hold:ada@example.com:manual-spike-agent-r1",
+          "run_state": "succeeded",
+          "recovery_attempts": "1"
+        },
+        {
+          "workflow_id": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "run_state": "succeeded",
+          "recovery_attempts": "1"
+        }
+      ],
+      "finalActions": [
+        {
+          "a": "calendar.hold",
+          "s": "executed"
+        },
+        {
+          "a": "crm.note",
+          "s": "executed"
+        },
+        {
+          "a": "email.draft",
+          "s": "rejected"
+        }
+      ]
+    },
+    "notes": [
+      "Executor workflow IDs equal the action idempotency keys; a second enqueue under the same ID returned the existing workflow.",
+      "The post-call/pre-checkpoint window is real: the provider saw the same key twice. Exactly-once effect came from the provider-side Idempotency-Key, as rule 3 says."
+    ]
+  },
+  "t3": {
+    "id": "t3",
+    "title": "Rolling deploy: old+new overlap with schedules running, then old disappears (SIGKILL)",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "overlapExecutorSamples": [
+        "t3-old",
+        "t3-old",
+        "t3-old",
+        "t3-old",
+        "t3-old",
+        "t3-old"
+      ],
+      "pendingOnOldAtKill": [
+        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z",
+        "manual-spike-agent-deploy-inflight",
+        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z",
+        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z"
+      ],
+      "takeoverMs": 9513,
+      "inflightRun": {
+        "run_state": "succeeded",
+        "executor_id": "t3-new",
+        "recovery_attempts": "1"
+      },
+      "inflightLedgerRows": 1,
+      "scheduledOccurrences": 9,
+      "distinctOccurrences": 9,
+      "byExecutor": {
+        "t3-old": 1,
+        "t3-new": 8
+      },
+      "nonTerminalAtEnd": [],
+      "duplicateActionGroups": 0,
+      "modelTurnsRunMoreThanOnce": {
+        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z": [
+          4
+        ],
+        "manual-spike-agent-deploy-inflight": [
+          4
+        ],
+        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z": [
+          2
+        ],
+        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z": [
+          0
+        ]
+      }
+    },
+    "notes": [
+      "Two live schedulers never produced two runs for one occurrence (ID = sched-<name>-<scheduled ISO>).",
+      "During overlap the new container never claimed the old one's PENDING work (unique executor IDs).",
+      "Turns re-run more than once are only the calls in flight when the old container was killed; completed ones replayed from checkpoints."
+    ]
+  },
+  "t3b": {
+    "id": "t3b",
+    "title": "Rolling deploy: old gets SIGTERM and drains in-flight work before exiting",
+    "classification": "PASS",
+    "metrics": {
+      "exitCode": 0,
+      "drainMs": 3817,
+      "finalState": {
+        "run_state": "succeeded",
+        "executor_id": "t3b-old",
+        "recovery_attempts": "1"
+      },
+      "oldExecutor": {
+        "stopped": true,
+        "reaped": false
+      },
+      "modelCallsPerTurn": {
+        "0": 1,
+        "1": 1,
+        "2": 1,
+        "3": 1,
+        "4": 1
+      }
+    },
+    "notes": [
+      "DBOS.shutdown({workflowCompletionTimeoutMS}) finished the in-flight run on the old container; nothing re-ran."
+    ]
+  },
+  "t4a": {
+    "id": "t4a",
+    "title": "Deploy a step-inserting code change while work is mid-flight (patching mode + DBOS.patch)",
+    "classification": "PASS",
+    "metrics": {
+      "settleMs": 5043,
+      "final": [
+        {
+          "logical_action": "calendar.hold",
+          "status": "executed",
+          "error": null
+        },
+        {
+          "logical_action": "crm.note",
+          "status": "executed",
+          "error": null
+        }
+      ],
+      "oldWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "newWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "DBOS.patch-audit-before-call",
+        "auditBeforeCall",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "executorRuns": [
+        {
+          "workflow_id": "spike-agent:calendar.hold:ada@example.com:manual-spike-agent-r1",
+          "run_state": "succeeded",
+          "dbos_status": "SUCCESS",
+          "app_version": "PATCHING_ENABLED",
+          "executor_id": "t4a-new",
+          "error_class": null
+        },
+        {
+          "workflow_id": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "run_state": "succeeded",
+          "dbos_status": "SUCCESS",
+          "app_version": "PATCHING_ENABLED",
+          "executor_id": "t4a-new",
+          "error_class": null
+        }
+      ],
+      "provider": {
+        "attempts": 2,
+        "n": 2,
+        "committed": 2,
+        "deduped": 0,
+        "faults": 0,
+        "uniqueEffects": 2
+      }
+    },
+    "notes": [
+      "Old execution replayed its original step sequence on new code; new executions took the patched branch. Nothing stranded."
+    ]
+  },
+  "t4b": {
+    "id": "t4b",
+    "title": "Same change WITHOUT DBOS.patch (the mistake rule 4 forbids)",
+    "classification": "PASS",
+    "metrics": {
+      "settleMs": "timed out after 25000ms waiting for both settle",
+      "final": [
+        {
+          "logical_action": "calendar.hold",
+          "status": "executed",
+          "error": null
+        },
+        {
+          "logical_action": "crm.note",
+          "status": "approved",
+          "error": null
+        }
+      ],
+      "oldWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "callProvider"
+      ],
+      "executorRuns": [
+        {
+          "workflow_id": "spike-agent:calendar.hold:ada@example.com:manual-spike-agent-r1",
+          "run_state": "succeeded",
+          "dbos_status": "SUCCESS",
+          "app_version": "PATCHING_ENABLED",
+          "executor_id": "t4b-new",
+          "error_class": null
+        },
+        {
+          "workflow_id": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "run_state": "failed",
+          "dbos_status": "ERROR",
+          "app_version": "PATCHING_ENABLED",
+          "executor_id": "t4b-new",
+          "error_class": "unclassified_workflow_error"
+        }
+      ],
+      "attention": [
+        {
+          "kind": "run_failed",
+          "ref": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "detail": "unclassified_workflow_error: ERROR"
+        },
+        {
+          "kind": "action_stuck",
+          "ref": "a833254d-9d70-4584-b983-4d6e3e9ae168",
+          "detail": "approved but executor failed"
+        }
+      ],
+      "dbosError": ""
+    },
+    "notes": [
+      "Expected-negative control: DBOS detects the step-sequence mismatch on replay and refuses to continue, instead of silently doing the wrong thing.",
+      "Classification is PASS if the unpatched change is caught and surfaced in health; it confirms the discipline is enforced, not optional."
+    ]
+  },
+  "t4c": {
+    "id": "t4c",
+    "title": "Same deploy in build-version mode (DBOS__APPVERSION = build ID)",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "finalWithOnlyV2Alive": [
+        {
+          "logical_action": "calendar.hold",
+          "status": "executed",
+          "error": null
+        },
+        {
+          "logical_action": "crm.note",
+          "status": "approved",
+          "error": null
+        }
+      ],
+      "strandedWhileOnlyV2": [
+        {
+          "workflow_id": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "run_state": "queued",
+          "app_version": "build-v1"
+        }
+      ],
+      "attentionWhileOnlyV2": [
+        {
+          "kind": "no_executor_for_version",
+          "ref": "spike-agent:crm.note:ada@example.com:manual-spike-agent-r1",
+          "detail": "queued at version build-v1 but no live executor runs that version"
+        }
+      ],
+      "newApprovalUnderV2": {
+        "logical_action": "calendar.hold",
+        "status": "executed",
+        "error": null
+      },
+      "drainedByOldBuildMs": 1010
+    },
+    "notes": [
+      "Hard rule 4 as written (version = build) strands an old build's in-flight work once the old container is gone: v2 executors will not dequeue v1 rows, even after resume.",
+      "Approval-enqueued work with no appVersion went to the latest version and ran fine — stranding only hits work that had already started.",
+      "Recovery requires keeping/starting an old-build executor until drained (or cross-version fork/rewind, which breaks the ID = idempotency-key rule)."
+    ]
+  },
+  "t4d": {
+    "id": "t4d",
+    "title": "Old code drains (SIGTERM, short window) while patched new code overlaps; new takes over and resumes the OLD branch",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "oldExitCode": 0,
+      "drainMs": 2029,
+      "workflowAtOldExit": {
+        "status": "PENDING",
+        "executor_id": "t4d-old"
+      },
+      "takeoverMs": 10898,
+      "oldExecutor": {
+        "drained_flag": true,
+        "reaped_by": "t4d-new"
+      },
+      "oldWorkflowFinal": {
+        "executor_id": "t4d-new",
+        "run_state": "succeeded"
+      },
+      "oldWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "newWorkflowSteps": [
+        "loadAction",
+        "recordRunStart",
+        "DBOS.patch-audit-before-call",
+        "auditBeforeCall",
+        "callProvider",
+        "markExecuted",
+        "recordRunEnd"
+      ],
+      "provider": {
+        "attempts": 2,
+        "n": 2,
+        "committed": 2,
+        "deduped": 0,
+        "faults": 0,
+        "uniqueEffects": 2
+      }
+    },
+    "notes": [
+      "Drain timed out with the workflow mid-step, so it stayed PENDING under the old executor; the new (patched) executor reaped it and DBOS.patch() returned false at the patch point, so the old step sequence resumed.",
+      "callProvider was replayed from its checkpoint: 2 provider attempts total for 2 actions, no re-call."
+    ]
+  },
+  "t5": {
+    "id": "t5",
+    "title": "Provider / connection failures → error classification and health state",
+    "classification": "PASS",
+    "metrics": {
+      "modelAuth": {
+        "run_state": "failed",
+        "error_class": "provider_auth",
+        "error_message": "invalid x-api-key",
+        "modelCalls": 1
+      },
+      "healthAfterAuth": {
+        "health_state": "failing",
+        "last_error_class": "provider_auth"
+      },
+      "modelOverloaded": {
+        "run_state": "failed",
+        "error_class": "provider_unavailable",
+        "modelCalls": 3
+      },
+      "healthAfterRecovery": {
+        "health_state": "healthy"
+      },
+      "executorTransient": {
+        "attempts": 3,
+        "n": 3,
+        "committed": 1,
+        "deduped": 0,
+        "faults": 2,
+        "uniqueEffects": 1
+      },
+      "executorHardDown": {
+        "status": "failed",
+        "error": "provider_unavailable: provider 503: injected fault (503)",
+        "run_state": "failed",
+        "error_class": "provider_unavailable"
+      },
+      "connectionExpired": {
+        "run_state": "failed",
+        "error_class": "connection_unavailable",
+        "modelCalls": 0
+      },
+      "healthWhenBlocked": {
+        "health_state": "blocked",
+        "blocked_connections": [
+          "fake_provider:spike"
+        ]
+      },
+      "attention": [
+        {
+          "kind": "action_failed",
+          "ref": "5c6a1485-c5f2-4df7-a958-f91d09e9fd0e",
+          "detail": "provider_unavailable: provider 503: injected fault (503)"
+        },
+        {
+          "kind": "connection_problem",
+          "ref": "fake_provider:spike",
+          "detail": "expired: refresh token expired"
+        },
+        {
+          "kind": "run_failed",
+          "ref": "manual-spike-agent-auth",
+          "detail": "provider_auth: invalid x-api-key"
+        },
+        {
+          "kind": "run_failed",
+          "ref": "manual-spike-agent-overloaded",
+          "detail": "provider_unavailable: overloaded"
+        },
+        {
+          "kind": "run_failed",
+          "ref": "spike-agent:calendar.hold:ada@example.com:manual-spike-agent-ok",
+          "detail": "provider_unavailable: provider 503: injected fault (503)"
+        },
+        {
+          "kind": "run_failed",
+          "ref": "manual-spike-agent-conn",
+          "detail": "connection_unavailable: required connection(s) not active: fake_provider:spike"
+        }
+      ]
+    },
+    "notes": [
+      "Non-retryable auth errors fail fast (1 call); retryable overload retries to the durableCalls limit; an expired required connection blocks before any model spend."
+    ]
+  },
+  "t6": {
+    "id": "t6",
+    "title": "ops.v_runs feeds health + attention without coupling them to DBOS internals",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "pgDependOpsOnDbos": [],
+      "viewsMentioningDbos": [
+        {
+          "viewname": "v_runs",
+          "mentions_dbos": false
+        },
+        {
+          "viewname": "agent_health",
+          "mentions_dbos": false
+        },
+        {
+          "viewname": "attention_queue",
+          "mentions_dbos": false
+        }
+      ],
+      "statusCountsDbosApi": {
+        "ERROR": 4,
+        "SUCCESS": 2
+      },
+      "statusCountsVRuns": {
+        "ERROR": 4,
+        "SUCCESS": 2
+      },
+      "health": [
+        {
+          "agent_id": "spike-agent",
+          "health_state": "blocked",
+          "last_outcome": "failed",
+          "last_error_class": "connection_unavailable",
+          "last_finished_at": "2026-10-25T23:38:57.115Z",
+          "runs_24h": "4",
+          "failures_24h": "3",
+          "running_now": "0",
+          "pending_approvals": "1",
+          "blocked_connections": [
+            "fake_provider:spike"
+          ]
+        }
+      ]
+    },
+    "notes": [
+      "Zero pg_depend edges from ops.* to dbos.*: DBOS migrations can never be blocked by our views.",
+      "Only ops.dbos_workflows() names a dbos table; agent_health/attention_queue read v_runs only.",
+      "v_runs status counts match the public DBOSClient.listWorkflows() API exactly."
+    ]
+  },
+  "t7": {
+    "id": "t7",
+    "title": "Supabase-style connection modes: direct / session pooler / transaction pooler (pgbouncer stand-in)",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "guardOn6543": "refused: Refusing to start: aws-0-us-east-1.pooler.supabase.com:6543 looks like a transac",
+      "guardOnSession5432": "allowed",
+      "listenProbeDirect": "ok",
+      "listenProbeSessionPooler": "ok",
+      "listenProbeTxPooler": "fail: LISTEN/NOTIFY probe timed out after 3000ms — not a session-capable connection",
+      "workerOnTxPoolerWithGuard": {
+        "exitCode": 1
+      },
+      "sessionPooler": {
+        "crashRecovery": "succeeded",
+        "approvalToExecutedMs": 1030,
+        "dbosSelfTestWarning": false
+      },
+      "transactionPoolerWithGuardBypassed": {
+        "booted": true,
+        "dbosSelfTestWarning": true,
+        "runCompletedMs": 2238
+      }
+    },
+    "notes": [
+      "Stand-in: local pgbouncer in session and transaction pool modes. Supabase's pooler is Supavisor; re-run t7 against the real project before locking.",
+      "DBOS 5.3 itself only WARNS behind a transaction pooler and falls back to polling; our startup guard turns that silent degradation into a refusal."
+    ]
+  },
+  "t8": {
+    "id": "t8",
+    "title": "Upgrade DBOS under live data (5.1.10 → 5.2.11 → 5.3.0)",
+    "classification": "PASS",
+    "metrics": {
+      "exitCode": 0,
+      "transcript": [
+        "== seed with DBOS 5.1.10",
+        "Running DBOS system database migrations...",
+        "migrations applied: 122",
+        "== upgrade -> DBOS 5.2.11 (probe-pending-5.1.10 before: PENDING)",
+        "Running DBOS system database migrations...",
+        "[probe] recovered result: done-pending",
+        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=1 attention rows=0 | ops->dbos deps=0",
+        "== upgrade -> DBOS 5.3.0 (probe-pending-5.2.11 before: PENDING)",
+        "[probe] recovered result: done-pending",
+        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=1 attention rows=0 | ops->dbos deps=0",
+        "UPGRADE TEST: PASS"
+      ]
+    },
+    "notes": [
+      "Each hop: a workflow is SIGKILLed mid-flight under the old DBOS, then the new DBOS launches (running its migrations) and finishes it.",
+      "npm only carries the latest patch of each 5.x minor (5.0.2, 5.1.10, 5.2.11, 5.3.0), so this is two consecutive minor hops rather than a same-minor patch hop.",
+      "5.1.10 → 5.2.11 includes a real schema migration (122 → 123) applied with ops views in place; 5.2.11 → 5.3.0 has none."
+    ]
+  }
+}
