@@ -35,6 +35,8 @@ pending="probe-pending-$first"
 psql "$DB_URL" -q -f sql/001_ops_schema.sql
 psql "$DB_URL" -q -f sql/003_connections.sql
 psql "$DB_URL" -q -f sql/004_calendar_prep.sql
+psql "$DB_URL" -q -f sql/005_attention.sql
+psql "$DB_URL" -q -f sql/006_prep_holds.sql
 psql "$DB_URL" -q -f sql/002_views.sql
 echo "migrations applied: $(psql_db 'select version from dbos.dbos_migrations')"
 echo "v_runs: $(psql_db "select string_agg(workflow_id || '=' || dbos_status, ', ' order by workflow_id) from ops.v_runs")"

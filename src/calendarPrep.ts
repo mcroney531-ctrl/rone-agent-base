@@ -14,6 +14,7 @@ import {
   deleteEvent, ensureAgentOpsCalendar, getEvent, insertEventOnce, listEvents, upsertEvent, type CalendarEvent,
 } from './connections/google.js';
 import { addDays, clock, localDate, zonedMidnight } from './localDay.js';
+import { busyIntervals, findSlot, normalizeRequest, overlapsAny, SLOT_DEFAULTS, type HoldRequest, type Interval, type SlotSettings } from './slots.js';
 import { insertAction, recordRunEnd, recordRunStart, type AgentRow, type Trigger } from './workflows.js';
 
 // Google event IDs allow [a-v0-9], 5–1024 chars; hex is a subset. Same input → same event.
@@ -89,12 +90,21 @@ export function hardFilter(e: CalendarEvent): string | null {
 
 // No length/range constraints in the schema itself (not every provider's structured-output mode accepts
 // them); they're enforced after parsing instead.
+// Claude answers "would prep help, how much time, how long before" — never WHEN. Placement is deterministic (slots.ts).
 const RankingSchema = z.object({
   headline: z.string(),
   items: z.array(z.object({
     ref: z.string(),
     why: z.string(),
     prep: z.array(z.string()),
+    hold: z.object({ idealMinutes: z.number(), minimumMinutes: z.number(), preferredLeadMinutes: z.number() }).nullable(),
+  })),
+});
+// Pre-availability shape: only parsed when replaying a run that was in flight across the deploy (see DBOS.patch below).
+const LegacyRankingSchema = z.object({
+  headline: z.string(),
+  items: z.array(z.object({
+    ref: z.string(), why: z.string(), prep: z.array(z.string()),
     hold: z.object({ durationMinutes: z.number(), minutesBefore: z.number() }).nullable(),
   })),
 });
@@ -108,7 +118,10 @@ export type BriefItem = {
   localStart: string | null;
   why: string;
   prep: string[];
-  hold: { start: string; end: string } | null;
+  holdRequest: HoldRequest | null;
+  // proposed = placed this run; pending/executed/rejected/... = the owner's decision on an earlier run, kept as is
+  hold: { start: string; end: string; status: string } | null;
+  holdNote?: string;
   features: EventFeatures;
 };
 
@@ -117,14 +130,16 @@ function rankingPrompt(date: string, tz: string, candidates: EventFeatures[], no
   return [
     `Tomorrow is ${date} (${tz}). These are tomorrow's events after removing cancelled, declined, focus blocks and birthdays.`,
     'Return only the events worth preparing for, by ref. For each: why (one sentence), prep (at most 3 concrete points),',
-    'and hold = {durationMinutes, minutesBefore} only if real preparation time should be blocked beforehand, otherwise null.',
+    'and hold = {idealMinutes, minimumMinutes, preferredLeadMinutes} only if real preparation time should be blocked beforehand,',
+    'otherwise null. idealMinutes = useful prep time; minimumMinutes = shortest still-useful block; preferredLeadMinutes =',
+    'how long before the meeting the prep should ideally end. Do not pick clock times; free time is found for you.',
     'headline = one short line summarising tomorrow. If nothing is worth preparing, return an empty items list.',
     notUseful.length ? `The person recently marked these as NOT useful to prep for; weigh similar events down: ${JSON.stringify(notUseful)}` : '',
     `<events>${JSON.stringify(refs)}</events>`,
   ].filter(Boolean).join('\n');
 }
 
-function toBriefItems(ranking: z.infer<typeof RankingSchema>, candidates: EventFeatures[]): BriefItem[] {
+function toBriefItems(ranking: z.infer<typeof RankingSchema> | z.infer<typeof LegacyRankingSchema>, candidates: EventFeatures[]): BriefItem[] {
   const byRef = new Map(candidates.map((f, i) => [`e${i + 1}`, f]));
   const seen = new Set<string>();
   const items: BriefItem[] = [];
@@ -132,19 +147,70 @@ function toBriefItems(ranking: z.infer<typeof RankingSchema>, candidates: EventF
     const f = byRef.get(r.ref);
     if (!f || seen.has(r.ref)) continue; // the model can only pick from what it was shown
     seen.add(r.ref);
-    let hold: BriefItem['hold'] = null;
-    if (r.hold && !f.allDay) {
-      const duration = Math.min(Math.max(Math.round(r.hold.durationMinutes), 10), 120);
-      const before = Math.min(Math.max(Math.round(r.hold.minutesBefore), 0), 12 * 60);
-      const end = Date.parse(f.start) - before * 60_000;
-      hold = { start: new Date(end - duration * 60_000).toISOString(), end: new Date(end).toISOString() };
-    }
+    const h = r.hold as Record<string, number> | null;
+    const holdRequest: HoldRequest | null = !h || f.allDay ? null
+      : 'idealMinutes' in h ? normalizeRequest(h as unknown as HoldRequest)
+      : normalizeRequest({ idealMinutes: h.durationMinutes, minimumMinutes: h.durationMinutes, preferredLeadMinutes: h.minutesBefore });
     items.push({
       eventId: f.eventId, title: f.title, start: f.start, end: f.end, allDay: f.allDay, localStart: f.localStart,
-      why: r.why.slice(0, 300), prep: r.prep.slice(0, 3).map((p) => p.slice(0, 300)), hold, features: f,
+      why: r.why.slice(0, 300), prep: r.prep.slice(0, 3).map((p) => p.slice(0, 300)), holdRequest, hold: null, features: f,
     });
   }
   return items.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+}
+
+// What the owner already decided for this day, keyed by source event, plus what already blocks time on
+// Agent Ops (approved holds). Owner decisions have their own identity (ops.actions), independent of the brief.
+type Availability = {
+  opsEvents: CalendarEvent[];
+  latest: Record<string, { key: string; status: string; start: string; end: string }>;
+  notUseful: string[];
+};
+
+async function prepAvailability(agent: AgentRow, ctx: PrepContext): Promise<Availability> {
+  let opsEvents: CalendarEvent[] = [];
+  try {
+    const { calendarId } = await ensureAgentOpsCalendar(ctx.connectionId);
+    opsEvents = await listEvents(ctx.connectionId, calendarId, ctx.timeMin, ctx.timeMax, agent.timezone);
+  } catch (e) {
+    console.warn(`[calendar-prep] Agent Ops availability unavailable: ${(e as Error).message}`); // holds still avoid the primary calendar
+  }
+  const { rows } = await pool.query(
+    `select distinct on (target) target, idempotency_key, status, payload->>'start' as start, payload->>'end' as end
+       from ops.actions where agent_id = $1 and logical_action = 'agentops.hold' and payload->>'briefDate' = $2
+      order by target, created_at desc`,
+    [agent.id, ctx.date],
+  );
+  const fb = await pool.query(
+    `select f.event_id from ops.brief_feedback f join ops.briefs b on b.id = f.brief_id
+      where b.agent_id = $1 and b.brief_date = $2 and f.verdict in ('not_useful', 'dismissed')`,
+    [agent.id, ctx.date],
+  );
+  return {
+    opsEvents,
+    latest: Object.fromEntries(rows.map((r) => [r.target, { key: r.idempotency_key, status: r.status, start: r.start, end: r.end }])),
+    notUseful: fb.rows.map((r) => r.event_id),
+  };
+}
+
+const slotSettings = (agent: AgentRow): SlotSettings => ({ ...SLOT_DEFAULTS, ...(agent.settings?.prepHolds ?? {}) });
+
+// Pure: decided holds are shown as decided; everything else gets a fresh deterministic slot (or none).
+function placeHolds(items: BriefItem[], events: CalendarEvent[], avail: Availability, date: string, tz: string, settings: SlotSettings) {
+  const busy: Interval[] = [...busyIntervals(events), ...busyIntervals(avail.opsEvents)];
+  for (const i of items) {
+    const prior = avail.latest[i.eventId];
+    if (prior && prior.status !== 'pending_approval' && prior.status !== 'superseded') {
+      i.hold = { start: prior.start, end: prior.end, status: prior.status };
+      continue;
+    }
+    if (avail.notUseful.includes(i.eventId)) { i.holdNote = 'Marked not useful'; continue; }
+    if (!i.holdRequest) continue;
+    const slot = findSlot(Date.parse(i.start), i.holdRequest, busy, date, tz, settings);
+    if (!slot) { i.holdNote = 'No free time before the meeting'; continue; }
+    i.hold = { start: new Date(slot.start).toISOString(), end: new Date(slot.end).toISOString(), status: 'proposed' };
+    busy.push(slot); // two holds never take the same gap
+  }
 }
 
 // ---------- steps ----------
@@ -187,7 +253,11 @@ async function saveBrief(agent: AgentRow, ctx: PrepContext, workflowId: string, 
      on conflict (agent_id, brief_date) do update set
        timezone = excluded.timezone, time_min = excluded.time_min, time_max = excluded.time_max, connection_id = excluded.connection_id,
        source_workflow_id = excluded.source_workflow_id, headline = excluded.headline, items = excluded.items,
-       considered = excluded.considered, filtered = excluded.filtered, seen_at = null, updated_at = now()
+       considered = excluded.considered, filtered = excluded.filtered, updated_at = now(),
+       -- re-raise "Brief is ready" only when the set of meetings (or their times) changed
+       seen_at = case when (select jsonb_agg(jsonb_build_array(i->'eventId', i->'start')) from jsonb_array_elements(ops.briefs.items) i)
+                       is not distinct from (select jsonb_agg(jsonb_build_array(i->'eventId', i->'start')) from jsonb_array_elements(excluded.items) i)
+                      then ops.briefs.seen_at end
      returning id`,
     [agent.id, ctx.date, agent.timezone, ctx.timeMin, ctx.timeMax, ctx.connectionId, workflowId, b.headline,
       JSON.stringify(b.items), b.considered, JSON.stringify(b.filtered)],
@@ -235,6 +305,11 @@ export async function calendarPrepRun(agent: AgentRow, trigger: Trigger, workflo
     name: 'listEvents', retriesAllowed: true, maxAttempts: 3, intervalSeconds: 2, backoffRate: 2,
   });
 
+  // v2 adds the availability step. DBOS.patch: a run that was already past this point when the deploy
+  // happened replays the old step sequence (and its old ranking schema) instead.
+  const v2 = await DBOS.patch('calendar-prep-availability');
+  const avail = v2 ? await DBOS.runStep(() => prepAvailability(agent, ctx), { name: 'prepAvailability' }) : null;
+
   const filtered: { eventId: string; title: string; reason: string }[] = [];
   const candidates: EventFeatures[] = [];
   for (const e of events) {
@@ -251,11 +326,13 @@ export async function calendarPrepRun(agent: AgentRow, trigger: Trigger, workflo
       model: agentModel(agent.model),
       system: agent.instructions,
       prompt: rankingPrompt(ctx.date, agent.timezone, candidates, ctx.notUseful),
-      output: Output.object({ schema: RankingSchema, name: 'calendar_prep_ranking' }),
+      output: Output.object({ schema: (v2 ? RankingSchema : LegacyRankingSchema) as typeof RankingSchema, name: 'calendar_prep_ranking' }),
     });
     items = toBriefItems(result.output, candidates);
     headline = result.output.headline.slice(0, 200) || `${items.length} to prepare for`;
   }
+  // Availability counts EVERY event that blocks time, including ones filtered out of ranking (focus, standups).
+  if (avail) placeHolds(items, events, avail, ctx.date, agent.timezone, slotSettings(agent));
 
   const saved = await DBOS.runStep(() => saveBrief(agent, ctx, workflowId, { headline, items, considered: candidates.length, filtered }), { name: 'saveBrief' });
 
@@ -279,17 +356,35 @@ export async function calendarPrepRun(agent: AgentRow, trigger: Trigger, workflo
     );
   }, { name: 'saveMirrorStatus' });
 
-  // One hold proposal per (event, day): re-running the brief never proposes the same hold twice.
+  // Pending holds always mirror the current proposal; anything the owner already decided is left alone.
   const proposed = await DBOS.runStep(async () => {
+    const settings = slotSettings(agent);
     let n = 0;
-    for (const i of items.filter((x) => x.hold)) {
+    const offered: string[] = [];
+    for (const i of items.filter((x) => x.hold?.status === 'proposed')) {
+      const prior = avail?.latest[i.eventId];
       await insertAction(agent, workflowId, {
         action: 'agentops.hold',
         target: i.eventId,
-        payload: { connectionId: ctx.connectionId, title: `Prep: ${i.title}`, start: i.hold!.start, end: i.hold!.end, briefDate: ctx.date, sourceTitle: i.title, prep: i.prep },
-        idempotencyKey: `${agent.id}:agentops.hold:${i.eventId}:${ctx.date}`,
+        payload: {
+          connectionId: ctx.connectionId, title: `Prep: ${i.title}`, start: i.hold!.start, end: i.hold!.end, briefDate: ctx.date,
+          sourceTitle: i.title, prep: i.prep, meetingStart: i.start, request: i.holdRequest, timezone: agent.timezone, settings,
+        },
+        // Undecided → refresh it in place. Superseded earlier → a new identity for this run's proposal.
+        idempotencyKey: prior?.status === 'pending_approval' ? prior.key
+          : prior ? `${agent.id}:agentops.hold:${i.eventId}:${ctx.date}:${workflowId}` : `${agent.id}:agentops.hold:${i.eventId}:${ctx.date}`,
+        refreshPending: true,
       });
+      offered.push(i.eventId);
       n++;
+    }
+    if (avail) {
+      await pool.query(
+        `update ops.actions set status = 'superseded', error = 'no longer proposed by the latest brief', updated_at = now()
+          where agent_id = $1 and logical_action = 'agentops.hold' and status = 'pending_approval'
+            and payload->>'briefDate' = $2 and not (target = any($3::text[]))`,
+        [agent.id, ctx.date, offered],
+      );
     }
     return n;
   }, { name: 'proposeHolds' });
@@ -299,17 +394,56 @@ export async function calendarPrepRun(agent: AgentRow, trigger: Trigger, workflo
 
 // ---------- executor side: an approved agentops.hold becomes an Agent Ops event ----------
 
-export async function createAgentOpsHold(action: { idempotency_key: string; target: string; payload: Record<string, unknown> }) {
-  const p = action.payload as { connectionId: string; title: string; start: string; end: string; prep?: string[]; sourceTitle?: string };
+type HoldPayload = {
+  connectionId: string; title: string; start: string; end: string; prep?: string[]; sourceTitle?: string; briefDate?: string;
+  meetingStart?: string; request?: HoldRequest | null; timezone?: string; settings?: SlotSettings; movedFrom?: string;
+};
+export type HoldOutcome =
+  | { outcome: 'created'; calendarId: string; eventId: string; created: boolean; htmlLink: string | null }
+  | { outcome: 'moved'; replacementKey: string; start: string; end: string }
+  | { outcome: 'no_slot'; message: string };
+
+// Approval can come hours after the proposal, so the slot is re-checked against the calendar AS IT IS NOW.
+// Still free → write it. Taken → propose the next legitimate slot for a fresh approval, or report that none fits.
+export async function createAgentOpsHold(action: { agent_id: string; idempotency_key: string; target: string; payload: Record<string, unknown> }): Promise<HoldOutcome> {
+  const p = action.payload as HoldPayload;
   const { calendarId } = await ensureAgentOpsCalendar(p.connectionId);
   const eventId = googleEventId(`hold:${action.idempotency_key}`);
+  const slot = { start: Date.parse(p.start), end: Date.parse(p.end) };
+
+  if (p.briefDate && p.timezone) {
+    const dayMin = zonedMidnight(p.briefDate, p.timezone).toISOString();
+    const dayMax = zonedMidnight(addDays(p.briefDate, 1), p.timezone).toISOString();
+    const [primary, ops] = await Promise.all([
+      listEvents(p.connectionId, 'primary', dayMin, dayMax, p.timezone),
+      listEvents(p.connectionId, calendarId, dayMin, dayMax, p.timezone),
+    ]);
+    // Our own event ID is excluded: a retried execution must not see its own hold as a conflict.
+    const busy = [...busyIntervals(primary), ...busyIntervals(ops, new Set([eventId]))];
+    if (overlapsAny(slot, busy)) {
+      const next = p.request && p.meetingStart
+        ? findSlot(Date.parse(p.meetingStart), p.request, busy, p.briefDate, p.timezone, p.settings ?? SLOT_DEFAULTS) : null;
+      if (!next) return { outcome: 'no_slot', message: 'That slot is no longer free and no other free time fits before the meeting.' };
+      const start = new Date(next.start).toISOString();
+      const end = new Date(next.end).toISOString();
+      const replacementKey = `${action.idempotency_key}:moved:${start}`;
+      await pool.query(
+        `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
+         select $1, $2, 'agentops.hold', $3, $4, t.default_risk, $5 from ops.tools t where t.name = 'agentops.hold'
+         on conflict (idempotency_key) do nothing`,
+        [action.agent_id, action.idempotency_key, action.target, { ...p, start, end, movedFrom: p.start }, replacementKey],
+      );
+      return { outcome: 'moved', replacementKey, start, end };
+    }
+  }
+
   const ev = await insertEventOnce(p.connectionId, calendarId, eventId, {
     summary: p.title,
     description: [`Prep for: ${p.sourceTitle ?? ''}`, ...(p.prep ?? []).map((x) => `• ${x}`)].join('\n'),
     start: { dateTime: p.start },
     end: { dateTime: p.end },
   });
-  return { calendarId, eventId: ev.id, created: ev.created, htmlLink: ev.htmlLink ?? null };
+  return { outcome: 'created', calendarId, eventId: ev.id, created: ev.created, htmlLink: ev.htmlLink ?? null };
 }
 
 // ---------- "Request deeper prep": a focused second pass on one brief item ----------

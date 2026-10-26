@@ -209,7 +209,10 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
 
   const evs = G.appEvents.get(calId);
   if (!evs) return send(res, 404, { error: { code: 404 } }), true;
-  if (!eventId && req.method === 'GET') return send(res, 200, { items: [...evs.values()].filter((e) => e.status !== 'cancelled') }), true;
+  if (!eventId && req.method === 'GET') {
+    const items = [...evs.values()].filter((e) => e.status !== 'cancelled' && inWindow(e, u.searchParams.get('timeMin'), u.searchParams.get('timeMax')));
+    return send(res, 200, { items }), true;
+  }
   if (!eventId && req.method === 'POST') {
     const body = (await readBody(req)) as Record<string, unknown>;
     const id = String(body.id ?? randomUUID().replace(/-/g, ''));
