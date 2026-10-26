@@ -133,5 +133,7 @@ Not covered on the real environment: a transient model failure (only the scripte
 
 ## Housekeeping
 
-- The superseded build's `agent_base` schema still exists in the **link-hoarder** Supabase project; its SQL is kept in `supabase/legacy/`. Drop it with `drop schema agent_base cascade;` once you've confirmed nothing uses it.
-- The spike's `dbos.*` / `ops.*` schemas now live in the **link-hoarder** Supabase project, created by the Railway worker. The validation runs left test rows in `ops.*` (agent `spike-agent`).
+- **Spike infrastructure torn down (2026-10-26).** Railway `validator` and `externals` are deleted; the worker's crash endpoint is off (`ENABLE_CHAOS=0`) and test hooks are reset. The `spike-agent` config row is kept but disabled and its DBOS schedule paused. Test rows are cleared from `ops.actions` / `ops.runs` / `ops.state` / `ops.executors`; DBOS's own workflow history from the validation runs remains in `dbos.*`.
+- **The superseded `agent_base` schema is dropped** from link-hoarder, after a check showed no dependents, no references, and only its seed rows. Its SQL is archived in `supabase/legacy/`.
+- **Still standing:** the Railway `worker` (production skeleton), the `dbos.*` and clean `ops.*` schemas in link-hoarder, the recovery machinery, and the local failure suite + validator as the regression harness.
+- **Railway source:** the worker follows branch `claude/new-session-ehc1ld` (its commit pin was dropped by a variable redeploy, F12), so pushes to that branch redeploy it.
