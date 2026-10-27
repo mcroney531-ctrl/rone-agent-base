@@ -10,7 +10,9 @@
 // of the account on every device and in every app sharing the Supabase project.
 export class AuthError extends Error {}
 
-export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSession = () => {}, reuseMs = 10_000 }) {
+// beforeRequest runs (and is awaited) before every API call: the app uses it to hold requests while it
+// checks that this tab is still running the deployed build (a stale tab reloads instead of calling out).
+export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSession = () => {}, reuseMs = 10_000, beforeRequest = async () => {} }) {
   let refreshing = null;               // the in-flight forced refresh, shared by every caller
   let lastRefresh = { at: 0, token: '' };
   let signingOut = null;
@@ -55,6 +57,7 @@ export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSess
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
+    await beforeRequest();
     let res = await call(await currentToken());
     if (res.status === 401) {
       const fresh = sb ? await forcedToken() : '';

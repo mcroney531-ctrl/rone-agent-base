@@ -148,8 +148,22 @@ const enc = encodeURIComponent;
 
 // ---------- API ----------
 let session = null;
+// Stale-tab guard. A tab left open across a deploy keeps running the code it loaded; one from before the
+// auth fix signed every device out (INC-2026-10-27, second occurrence). On resume, API calls wait while we
+// compare builds; if the server has moved on, reload instead of running old code.
+const BUILD = cfg.build;
+let buildGate = Promise.resolve();
+function checkBuild() {
+  buildGate = (async () => {
+    try {
+      const now = await (await fetch('/app/config', { cache: 'no-store' })).json();
+      if (BUILD && now.build && now.build !== BUILD) { location.reload(); await new Promise(() => {}); } // hold every call until the reload
+    } catch { /* offline or blip: carry on with this build */ }
+  })();
+  return buildGate;
+}
 // Auth rule: a 401 never signs out directly; see /app/session.js.
-const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; } });
+const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; }, beforeRequest: () => buildGate });
 
 // ---------- screens ----------
 function loginScreen(note) {
@@ -457,7 +471,12 @@ navigator.serviceWorker?.addEventListener('message', (e) => {
 });
 // Installability (Android WebAPK) needs an active service worker for the app's scope.
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/sw.js', { scope: '/app/' }).catch((e) => console.warn('sw', e));
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && session) route(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  checkBuild();
+  if (session) route();
+});
+addEventListener('pageshow', (e) => { if (e.persisted) checkBuild(); }); // restored from the back/forward cache
 // The magic link lands with tokens in the URL fragment; supabase-js consumes them, then start on Needs You.
 if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app/#/');
 route();

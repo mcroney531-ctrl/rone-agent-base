@@ -36,7 +36,9 @@ try {
   const cfg = await call('GET', '/app/config');
   check('app shell + public config served without auth (no secrets in config)', shell.status === 200 && /Needs You/.test(shell.body)
     && cfg.body.supabaseUrl === `${EXTERNALS}/supabase` && cfg.body.supabaseKey === 'sb_publishable_test'
-    && JSON.stringify(Object.keys(cfg.body).sort()) === '["pushPublicKey","supabaseKey","supabaseUrl"]', cfg.body);
+    && JSON.stringify(Object.keys(cfg.body).sort()) === '["build","pushPublicKey","supabaseKey","supabaseUrl"]', cfg.body);
+  const cfg2 = await call('GET', '/app/config');
+  check('config carries a stable build id for the stale-tab guard', /^[0-9a-f]{12}$/.test(cfg.body.build) && cfg2.body.build === cfg.body.build, cfg.body.build);
 
   const noAuth = await call('GET', '/attention');
   const badSession = await call('GET', '/attention', 'expired-session');
