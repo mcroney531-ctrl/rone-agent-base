@@ -14,7 +14,7 @@ import { deeperPrep } from './calendarPrep.js';
 import { briefView, setFeedback } from './briefs.js';
 import { listDevices, registerDevice, removeDevice, sendTest, startNotifier, vapidKeys } from './notify.js';
 import { authenticate, callerLabel, publicAuthConfig } from './auth.js';
-import { actOnAttention, attentionDetail, listAgents, listAttention, runAgentNow } from './attention.js';
+import { actOnAttention, AgentPausedError, assertNotPaused, attentionDetail, listAgents, listAttention, runAgentNow, setPaused } from './attention.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
@@ -59,6 +59,7 @@ await applySql('006_prep_holds.sql');
 await applySql('007_brief_view.sql');
 await applySql('008_push.sql');
 await applySql('009_push_deliveries.sql');
+await applySql('010_agent_pause.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -200,6 +201,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'GET' && url.pathname === '/agents') return send(res, 200, await listAgents());
+    // Pause/resume: POST /agents/:id/pause | /resume (idempotent).
+    if (req.method === 'POST' && parts[0] === 'agents' && parts[1] && (parts[2] === 'pause' || parts[2] === 'resume') && parts.length === 3) {
+      const paused = parts[2] === 'pause';
+      if (!(await setPaused(parts[1], paused, by))) return send(res, 404, { error: 'no such agent' });
+      return send(res, 200, { ok: true, paused, message: paused ? 'Paused. Scheduled runs will be skipped.' : 'Resumed.' });
+    }
     // Push devices: one per browser/device subscription.
     if (parts[0] === 'push' && parts[1] === 'devices') {
       if (req.method === 'GET' && parts.length === 2) return send(res, 200, await listDevices());
@@ -332,6 +339,7 @@ const server = http.createServer(async (req, res) => {
       const forDate = body.date === undefined ? undefined : String(body.date);
       if (forDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(forDate)) return send(res, 400, { error: 'date must be YYYY-MM-DD' });
       if (!forDate) return send(res, 202, { workflowID: (await runAgentNow(parts[1], requestId)).workflowId });
+      await assertNotPaused(parts[1]);
       const workflowID = `manual-${parts[1]}-${requestId}`;
       await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'manual', sourceEvent: requestId, forDate });
       return send(res, 202, { workflowID });
@@ -339,12 +347,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && parts[0] === 'webhooks' && parts[1]) {
       const eventId = String((await readJson(req)).eventId ?? '');
       if (!eventId) return send(res, 400, { error: 'eventId required' });
+      await assertNotPaused(parts[1]);
       const workflowID = `webhook-${parts[1]}-${eventId}`;
       await DBOS.startWorkflow(agentRun, { workflowID, queueName: AGENT_QUEUE })(parts[1], { type: 'webhook', sourceEvent: eventId });
       return send(res, 202, { workflowID });
     }
     send(res, 404, { error: 'not found' });
   } catch (err) {
+    if (err instanceof AgentPausedError) return send(res, 409, { error: err.message });
     console.error('[http]', err);
     send(res, 500, { error: (err as Error).message });
   }

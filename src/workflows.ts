@@ -192,10 +192,25 @@ export async function insertAction(
 
 export const agentRun = DBOS.registerWorkflow(agentRunBody, { name: 'agentRun' });
 
+async function skipIfPaused(agentId: string, scheduledAt: Date): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `update ops.agents set last_skipped_at = greatest(coalesce(last_skipped_at, $2), $2) where id = $1 and paused_at is not null`,
+    [agentId, scheduledAt],
+  );
+  if (rowCount) console.log(`[schedule] ${agentId} is paused; skipped ${scheduledAt.toISOString()}`);
+  return rowCount === 1;
+}
+
 // Scheduled entry point. DBOS derives the workflow ID from schedule name + scheduled time
 // (sched-<name>-<ISO>), so each occurrence runs once no matter how many containers are alive.
 export const scheduledAgentRun = DBOS.registerWorkflow(
   async (scheduledAt: Date, context: { agentId: string }) => {
+    // A paused agent skips the occurrence (checkpointed, so a replay skips it too). Patched: an occurrence
+    // already in flight across the deploy replays without this step.
+    if (await DBOS.patch('agent-pause')) {
+      const skipped = await DBOS.runStep(() => skipIfPaused(context.agentId, scheduledAt), { name: 'skipIfPaused' });
+      if (skipped) return;
+    }
     await agentRunBody(context.agentId, { type: 'schedule', sourceEvent: scheduledAt.toISOString() });
   },
   { name: 'scheduledAgentRun' },

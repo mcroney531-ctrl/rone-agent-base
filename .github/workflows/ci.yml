@@ -102,6 +102,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-push.ts
 
+      - name: Pause/resume against live schedules
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-pause.ts
+
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4

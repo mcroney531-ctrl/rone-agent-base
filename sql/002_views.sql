@@ -86,6 +86,7 @@ blocked as (
 select
   a.id as agent_id,
   case
+    when a.paused_at is not null then 'paused'
     when b.connections is not null then 'blocked'
     when lf.run_state = 'failed' then 'failing'
     when exists (select 1 from recent x where x.agent_id = a.id and x.run_state = 'running'
