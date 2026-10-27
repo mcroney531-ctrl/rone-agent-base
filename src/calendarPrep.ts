@@ -129,11 +129,13 @@ function rankingPrompt(date: string, tz: string, candidates: EventFeatures[], no
   const refs = candidates.map((f, i) => ({ ref: `e${i + 1}`, ...f, eventId: undefined }));
   return [
     `Tomorrow is ${date} (${tz}). These are tomorrow's events after removing cancelled, declined, focus blocks and birthdays.`,
-    'Return only the events worth preparing for, by ref. For each: why (one sentence), prep (at most 3 concrete points),',
+    'Return only the events worth preparing for, by ref. For each: why = ONE short sentence (max ~15 words) saying what makes',
+    'this meeting matter; prep = at most 3 concrete points, each max ~12 words, no URLs (links are shown separately);',
     'and hold = {idealMinutes, minimumMinutes, preferredLeadMinutes} only if real preparation time should be blocked beforehand,',
     'otherwise null. idealMinutes = useful prep time; minimumMinutes = shortest still-useful block; preferredLeadMinutes =',
     'how long before the meeting the prep should ideally end. Do not pick clock times; free time is found for you.',
     'headline = one short line summarising tomorrow. If nothing is worth preparing, return an empty items list.',
+    'Refer to people by name or as "they"; never guess anyone\'s gender from their name.',
     notUseful.length ? `The person recently marked these as NOT useful to prep for; weigh similar events down: ${JSON.stringify(notUseful)}` : '',
     `<events>${JSON.stringify(refs)}</events>`,
   ].filter(Boolean).join('\n');
@@ -453,12 +455,19 @@ async function deeperPrepBody(briefId: string, eventId: string) {
   const ctx = await DBOS.runStep(async () => {
     const { rows } = await pool.query(
       `select b.agent_id, b.connection_id, b.brief_date::text as brief_date, b.timezone, a.model, a.instructions,
-              (select value from jsonb_array_elements(b.items) where value->>'eventId' = $2) as item
+              (select value from jsonb_array_elements(b.items) where value->>'eventId' = $2) as item,
+              (select jsonb_build_object('status', x.status, 'start', x.payload->>'start', 'end', x.payload->>'end')
+                 from ops.actions x where x.agent_id = b.agent_id and x.logical_action = 'agentops.hold' and x.target = $2
+                  and x.payload->>'briefDate' = b.brief_date::text and x.status <> 'superseded'
+                order by x.created_at desc limit 1) as hold
          from ops.briefs b join ops.agents a on a.id = b.agent_id where b.id = $1`,
       [briefId, eventId],
     );
     if (!rows[0]?.item) throw new OpsError('validation', `brief ${briefId} has no item ${eventId}`);
-    return rows[0] as { agent_id: string; connection_id: string; brief_date: string; timezone: string; model: string; instructions: string; item: BriefItem };
+    return rows[0] as {
+      agent_id: string; connection_id: string; brief_date: string; timezone: string; model: string; instructions: string; item: BriefItem;
+      hold?: { status: string; start: string; end: string } | null;
+    };
   }, { name: 'loadBriefItem' });
   await DBOS.runStep(() => recordRunStart({ workflowId, kind: 'agent_run', agentId: ctx.agent_id, trigger: 'deeper_prep', sourceEvent: `${briefId}/${eventId}` }), { name: 'recordRunStart' });
 
@@ -470,10 +479,13 @@ async function deeperPrepBody(briefId: string, eventId: string) {
       system: ctx.instructions,
       prompt: [
         '<deeper>Prepare me properly for this one meeting. Use only what is given; say what is unknown rather than guessing.',
-        'Format: short markdown with sections Context, What I want out of it, Questions to ask, Decisions/risks. Under 250 words.',
+        'Format: short markdown with sections Context, What I want out of it, Questions to ask, Decisions/risks. Under 200 words,',
+        'short bullets. Do not repeat the first-pass brief. Refer to people by name or as "they"; never guess gender from a name.',
         `Event: ${ev.summary ?? '(no title)'} at ${ctx.item.localStart ?? 'all day'} on ${ctx.brief_date} (${ctx.timezone}).`,
         `Attendees: ${attendees.join(', ') || 'none listed'}.`,
         `Organizer: ${ev.organizer?.email ?? 'unknown'}. Location: ${ev.location ?? 'none'}.`,
+        `Video call: ${ev.hangoutLink ?? ev.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri ?? 'none'}.`,
+        `Prep hold: ${ctx.hold ? `${ctx.hold.status === 'executed' ? 'already on the calendar' : ctx.hold.status} ${clock(ctx.hold.start, ctx.timezone)}–${clock(ctx.hold.end, ctx.timezone)}` : 'none'}.`,
         `Description: ${(ev.description ?? '').slice(0, 4000) || 'none'}`,
         `First-pass brief said: ${ctx.item.why} Prep: ${ctx.item.prep.join(' | ')}</deeper>`,
       ].join('\n'),
