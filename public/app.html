@@ -358,8 +358,67 @@ async function agents() {
         } catch (err) { handleErr(err); }
         e.currentTarget.disabled = false;
       } }, 'Run now')) : null)),
+    await notificationsCard(),
     h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
       h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await sb.auth.signOut(); session = null; route(); } }, 'Sign out')),
+  );
+}
+
+// ---------- push notifications (one subscription per device) ----------
+const b64ToBytes = (b64) => {
+  const s = atob((b64 + '='.repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+};
+const deviceLabel = () => {
+  const ua = navigator.userAgent;
+  const os = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : 'Device';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return `${os}${br ? ` · ${br}` : ''}`;
+};
+const myDeviceId = () => { try { return localStorage.getItem('pushDeviceId'); } catch { return null; } };
+const setMyDeviceId = (id) => { try { id ? localStorage.setItem('pushDeviceId', id) : localStorage.removeItem('pushDeviceId'); } catch { /* storage blocked */ } };
+
+async function notificationsCard() {
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && cfg.pushPublicKey;
+  const reg = supported ? await navigator.serviceWorker.getRegistration('/app/') : null;
+  const sub = reg ? await reg.pushManager.getSubscription() : null;
+  const { body: devices } = await api('/push/devices');
+  const on = Boolean(sub) && devices.some((d) => d.id === myDeviceId() && !d.disabled_at);
+  const turnOn = async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      if ((await Notification.requestPermission()) !== 'granted') { toast('Notifications are blocked for this site in browser settings.'); return route(); }
+      const r = await navigator.serviceWorker.ready;
+      const s = (await r.pushManager.getSubscription()) ?? await r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.pushPublicKey) });
+      const x = await api('/push/devices', { method: 'POST', body: { subscription: s.toJSON(), label: deviceLabel() } });
+      if (x.status !== 200) throw new Error(x.body.error ?? 'register failed');
+      setMyDeviceId(x.body.id);
+      toast('Notifications on for this device');
+    } catch (err) { if (err instanceof AuthError) return handleErr(err); toast(`Could not turn on notifications: ${err.message}`); }
+    route();
+  };
+  const turnOff = async () => {
+    try { await sub?.unsubscribe(); } catch { /* already gone */ }
+    if (myDeviceId()) await api(`/push/devices/${myDeviceId()}`, { method: 'DELETE' }).catch(() => undefined);
+    setMyDeviceId(null);
+    toast('Notifications off for this device');
+    route();
+  };
+  const test = async () => { const x = await api(`/push/devices/${myDeviceId()}/test`, { method: 'POST' }); toast(x.body.message ?? 'Sent'); };
+  return h('div', { class: 'card', style: 'margin-top:16px' },
+    h('div', { class: 'row' }, h('span', { class: 'title' }, 'Notifications'),
+      h('span', { class: `pill ${on ? 'healthy' : ''}` }, on ? 'on here' : 'off here')),
+    h('div', { class: 'muted' }, 'Pushes only what needs you: approvals, a ready brief, reconnects, failures. Quiet 10 PM–7 AM.'),
+    !supported ? h('p', { class: 'muted' }, 'Not supported in this browser. Install the app first.')
+      : Notification.permission === 'denied' ? h('p', { class: 'muted' }, 'Blocked for this site. Allow notifications in browser settings.')
+      : h('div', { class: 'actions' }, on
+        ? [h('button', { onclick: test }, 'Send test'), h('button', { onclick: turnOff }, 'Turn off here')]
+        : h('button', { class: 'primary', onclick: turnOn }, 'Turn on for this device')),
+    devices.length ? h('ul', { class: 'items', style: 'margin-top:8px' }, devices.map((d) => h('li', {},
+      h('div', { class: 'kv' }, h('span', {}, `${d.label}${d.id === myDeviceId() ? ' (this device)' : ''}`),
+        h('button', { class: 'linkbtn', onclick: async () => { await api(`/push/devices/${d.id}`, { method: 'DELETE' }); if (d.id === myDeviceId()) setMyDeviceId(null); route(); } }, 'Remove')),
+      h('div', { class: 'muted' }, d.disabled_at ? 'Expired: turn on again on that device'
+        : d.last_error ? `Last error: ${d.last_error}` : d.last_sent_at ? `Last sent ${ago(d.last_sent_at)}` : 'Nothing sent yet')))) : null,
   );
 }
 
@@ -391,6 +450,10 @@ if (sb) {
   sb.auth.onAuthStateChange((_event, s) => { const was = Boolean(session); session = s; if (was !== Boolean(s)) route(); });
 }
 addEventListener('hashchange', route);
+// A tapped notification while the app is already open: go where it points (same origin, /app only).
+navigator.serviceWorker?.addEventListener('message', (e) => {
+  if (e.data?.type === 'open' && typeof e.data.url === 'string' && e.data.url.startsWith(`${location.origin}/app`)) location.href = e.data.url;
+});
 // Installability (Android WebAPK) needs an active service worker for the app's scope.
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/sw.js', { scope: '/app/' }).catch((e) => console.warn('sw', e));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && session) route(); });

@@ -11,6 +11,7 @@ import {
 } from './workflows.js';
 import { deeperPrep } from './calendarPrep.js';
 import { briefView, setFeedback } from './briefs.js';
+import { listDevices, registerDevice, removeDevice, sendTest, startNotifier, vapidKeys } from './notify.js';
 import { authenticate, callerLabel, publicAuthConfig } from './auth.js';
 import { actOnAttention, attentionDetail, listAgents, listAttention, runAgentNow } from './attention.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
@@ -52,6 +53,7 @@ await applySql('004_calendar_prep.sql');
 await applySql('005_attention.sql');
 await applySql('006_prep_holds.sql');
 await applySql('007_brief_view.sql');
+await applySql('008_push.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -103,6 +105,7 @@ await registerExecutor();
 ensureAgentOpsCalendars().catch((e) => console.error(`[connections] boot check failed: ${(e as Error).message}`));
 await sweepDeadExecutors();
 const stopLiveness = startLivenessLoops();
+const stopNotifier = startNotifier();
 console.log(`[main] executor=${EXECUTOR_ID} version=${DBOS.applicationVersion} schedules=${scheduled.length}`);
 
 function escapeHtml(s: string): string {
@@ -157,7 +160,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/app/') {
       return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', 'referrer-policy': 'no-referrer' }).end(APP_HTML);
     }
-    if (req.method === 'GET' && url.pathname === '/app/config') return send(res, 200, publicAuthConfig());
+    if (req.method === 'GET' && url.pathname === '/app/config') {
+      const pushKey = process.env.CONNECTION_KEY ? (await vapidKeys().catch(() => undefined))?.publicKey ?? null : null;
+      return send(res, 200, { ...publicAuthConfig(), pushPublicKey: pushKey });
+    }
     if (req.method === 'GET' && url.pathname === '/app/sw.js') {
       return res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' }).end(APP_SW);
     }
@@ -186,6 +192,23 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'GET' && url.pathname === '/agents') return send(res, 200, await listAgents());
+    // Push devices: one per browser/device subscription.
+    if (parts[0] === 'push' && parts[1] === 'devices') {
+      if (req.method === 'GET' && parts.length === 2) return send(res, 200, await listDevices());
+      if (req.method === 'POST' && parts.length === 2) {
+        const body = await readJson(req);
+        try {
+          return send(res, 200, await registerDevice(body.subscription as never, String(body.label ?? 'Device'), String(req.headers['user-agent'] ?? '')));
+        } catch (e) {
+          return send(res, 400, { error: (e as Error).message });
+        }
+      }
+      if (req.method === 'DELETE' && parts.length === 3) return send(res, (await removeDevice(parts[2])) ? 200 : 404, {});
+      if (req.method === 'POST' && parts.length === 4 && parts[3] === 'test') {
+        const ok = await sendTest(parts[2]);
+        return send(res, ok ? 200 : 409, { ok, message: ok ? 'Test notification sent.' : 'Could not send to this device.' });
+      }
+    }
 
     if (req.method === 'GET' && url.pathname === '/connections') return send(res, 200, await listConnections());
     // Returns the Google consent URL to open in a browser; re-running it is how re-auth works.
@@ -331,6 +354,7 @@ process.on('SIGTERM', async () => {
   server.close();
   await DBOS.shutdown({ workflowCompletionTimeoutMS: DRAIN_TIMEOUT_MS });
   stopLiveness();
+  stopNotifier();
   await markStopped().catch(() => undefined);
   await client.destroy().catch(() => undefined);
   await pool.end().catch(() => undefined);

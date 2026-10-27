@@ -242,6 +242,8 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
   return send(res, 404, { error: { code: 404 } }), true;
 }
 
+const PUSHES: { id: string; headers: Record<string, string>; body: string }[] = [];
+
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
@@ -259,6 +261,17 @@ http
       const reqUrl = new URL(req.url ?? '/', 'http://x');
       const path = reqUrl.pathname;
       if (path.startsWith('/google/') && (await fakeGoogle(req, res, reqUrl))) return;
+      // Fake push service: records encrypted Web Push deliveries; endpoint id 'gone' answers 410.
+      if (path.startsWith('/push/')) {
+        if (path === '/push/admin/received') return send(res, 200, PUSHES);
+        if (path === '/push/admin/reset' && req.method === 'POST') { PUSHES.length = 0; return send(res, 200, { ok: true }); }
+        const id = path.split('/')[3]; // /push/recv/<id>
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        if (id === 'gone') return send(res, 410, { error: 'subscription expired' });
+        PUSHES.push({ id, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks).toString('base64') });
+        return res.writeHead(201).end();
+      }
       // Fake Supabase Auth: just enough of GET /auth/v1/user to test the owner guard.
       if (path === '/supabase/auth/v1/user') {
         const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
