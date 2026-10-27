@@ -7,36 +7,40 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Agent Ops">
 <meta name="theme-color" content="#05070d">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light">
 <link rel="manifest" href="/app/manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="/app/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/app/icons/apple-touch-icon.png">
 <title>Agent Ops</title>
 <style>
-  /* One dark theme, built around the logo: near-black navy, electric blue, signal green. */
+  /* White body under a near-black navy banner. Accent is the logo's cyan ring (deepened for contrast on white);
+     primary buttons take the banner's navy so the dark reads as the brand color. */
   :root {
-    color-scheme: dark;
-    --bg: #05070d; --card: #0c1220; --ink: #e8eefc; --muted: #8b97b3; --line: #1a2338;
-    --accent: #3d8bff; --accent-2: #19c6ff; --accent-ink: #ffffff; --glow: rgba(61, 139, 255, .14);
-    --danger: #ff6b6b; --problem: #fbbf24; --ok: #34e3a0;
+    color-scheme: light;
+    --bg: #ffffff; --card: #ffffff; --ink: #0b1220; --muted: #5b6578; --line: #e3e8f0; --soft: #f3f6fa;
+    --banner: #05070d; --banner-ink: #e8eefc; --banner-muted: #8b97b3; --banner-accent: #3fd8f0;
+    --accent: #0e7490; --accent-ink: #ffffff;
+    --danger: #c53030; --problem: #b45309; --ok: #0f8a5f;
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { margin: 0; background: var(--bg); color: var(--ink); }
-  body { background: radial-gradient(900px 420px at 50% -180px, var(--glow), transparent 70%) fixed, var(--bg); }
   body { font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; -webkit-text-size-adjust: 100%;
          padding: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom)); }
   main { max-width: 640px; margin: 0 auto; padding: 12px 16px 24px; }
-  header.top { display: flex; align-items: baseline; justify-content: space-between; margin: 8px 0 4px; }
-  .brand { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+  /* Full-bleed dark banner: the shadow paints the navy out to the screen edges, clip-path keeps it from spilling down. */
+  header.top { display: flex; align-items: center; justify-content: space-between; margin: -12px -16px 16px; padding: 12px 16px;
+               background: var(--banner); box-shadow: 0 0 0 100vmax var(--banner); clip-path: inset(0 -100vmax); }
+  header.top .back { color: var(--banner-accent); }
+  .brand { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--banner-muted); display: inline-flex; align-items: center; gap: 8px; }
   .brand img { width: 22px; height: 22px; border-radius: 6px; box-shadow: 0 0 12px rgba(25, 198, 255, .25); }
   .hero { display: flex; justify-content: center; margin: 32px 0 8px; }
-  .hero img { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 0 40px rgba(61, 139, 255, .35), 0 0 80px rgba(52, 227, 160, .12); }
-  .empty img { width: 56px; height: 56px; border-radius: 14px; opacity: .55; display: block; margin: 0 auto 12px; }
+  .hero img { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 8px 28px rgba(5, 7, 13, .25); }
+  .empty img { width: 56px; height: 56px; border-radius: 14px; opacity: .85; display: block; margin: 0 auto 12px; }
   h1 { font-size: 28px; margin: 4px 0 16px; display: flex; justify-content: space-between; align-items: baseline; }
   h1 .count { font-size: 22px; color: var(--muted); font-weight: 600; }
   h2 { font-size: 20px; margin: 8px 0 12px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 14px 12px; margin-bottom: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(11, 18, 32, .05); border-radius: 14px; padding: 14px 14px 12px; margin-bottom: 10px; }
   .card.tap { cursor: pointer; }
   .src { font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
   .src .sev-problem { color: var(--problem); }
@@ -46,8 +50,7 @@
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   button, .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 15px;
                  padding: 9px 14px; border-radius: 10px; min-height: 40px; cursor: pointer; }
-  button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--accent-ink); border-color: transparent; font-weight: 600;
-                   box-shadow: 0 0 16px rgba(61, 139, 255, .25); }
+  button.primary { background: var(--banner); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
   button.danger { color: var(--danger); }
   button:disabled { opacity: .5; }
   .empty { text-align: center; color: var(--muted); padding: 48px 8px; }
@@ -55,7 +58,7 @@
   dl { margin: 0; } dt { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 12px; }
   dd { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .back { color: var(--accent); background: none; border: none; padding: 8px 0; min-height: 0; }
-  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(12, 18, 32, .92); backdrop-filter: blur(10px); border-top: 1px solid var(--line);
+  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, .94); backdrop-filter: blur(10px); border-top: 1px solid var(--line);
              display: flex; padding-bottom: env(safe-area-inset-bottom); }
   nav.tabs a { flex: 1; text-align: center; padding: 12px 4px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 600; }
   nav.tabs a.on { color: var(--accent); }
@@ -82,7 +85,7 @@
   .kv a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
   .tag { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .ok { color: var(--ok); font-weight: 600; } .warn { color: var(--problem); }
-  .deeper { background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; font-size: 15px; }
+  .deeper { background: var(--soft); border-radius: 10px; padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; font-size: 15px; }
   .deeper { white-space: normal; } .deeper b { display: block; margin-top: 8px; } .deeper div { min-height: 1em; }
   .linkbtn { background: none; border: none; color: var(--accent); padding: 4px 0; min-height: 0; font-size: 14px; }
   .dismissed .kv { color: var(--muted); }
@@ -225,12 +228,12 @@ async function needsYou() {
 async function itemDetail(type, ref) {
   const r = await api(`/attention/${enc(type)}/${enc(ref)}`);
   if (r.status === 404) {
-    render(h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'), h('div', { class: 'empty' }, h('b', {}, 'All done'), 'This no longer needs you.'));
+    render(h('header', { class: 'top' }, h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'), brand()), h('div', { class: 'empty' }, h('b', {}, 'All done'), 'This no longer needs you.'));
     return;
   }
   const { item, facts } = r.body;
   render(
-    h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'),
+    h('header', { class: 'top' }, h('button', { class: 'back', onclick: () => go('#/') }, '‹ Needs You'), brand()),
     h('div', { class: 'src' }, h('span', {}, item.source), h('span', { class: `sev-${item.severity}` }, ago(item.createdAt))),
     h('h2', {}, item.title),
     item.summary ? h('p', { class: 'summary' }, item.summary) : null,
@@ -254,7 +257,7 @@ let briefTimer;
 async function brief(id) {
   clearTimeout(briefTimer);
   const r = await api(`/briefs/${enc(id)}`);
-  if (r.status !== 200) return render(h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), h('div', { class: 'empty' }, 'Brief not found.'));
+  if (r.status !== 200) return render(h('header', { class: 'top' }, h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), brand()), h('div', { class: 'empty' }, 'Brief not found.'));
   const b = r.body;
   // Opening the brief clears its Needs You items; refresh the badge so it doesn't lag behind.
   api(`/briefs/${b.id}/seen`, { method: 'POST' }).then(() => api('/attention')).then((x) => setBadge(x.body.length)).catch(() => undefined);
@@ -322,7 +325,7 @@ async function brief(id) {
   };
 
   render(
-    h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'),
+    h('header', { class: 'top' }, h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), brand()),
     h('div', { class: 'src' }, h('span', {}, day), h('span', {}, `${b.cards.length} to prep · ${b.considered} considered`)),
     h('h2', {}, b.headline ?? 'Brief'),
     ...(b.cards.length ? b.cards.map(card)
