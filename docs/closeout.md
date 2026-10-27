@@ -24,6 +24,15 @@ Flue is off the critical path. Rule 4 is amended to patching mode, and it is abs
 
 - **H1. Zombie / reaped-but-alive executor.** DBOS changes a recovered workflow's ownership token and checks it transactionally at every checkpoint, so a stale executor stops at its next checkpoint. The remaining exposure is both executors running the same unfinished step, which step idempotency and provider keys already cover. Our heartbeat adapter is what makes the reap decision, so test it: stop one executor's heartbeat while its workflow keeps running, let another take over, then confirm one workflow outcome, no duplicate committed effect, the old executor loses ownership at its checkpoint, and health/attention settle.
 - **H2. Real-provider transient model failure.** The 529 vs 401 classification and retry are proven locally; induce a real transient Anthropic failure when there's a clean way to.
+- **H3. Simultaneous boot on an empty database.** Two workers booting at the same moment against a fresh DB race DBOS's own system-table migrations ("tuple concurrently updated"); one crashes (found by the push test, 2026-10-27). No production exposure (the DB exists; Railway restarts crashed workers). Test first: two workers, empty DB → exactly one migration path, both eventually healthy. Likely fix: advisory lock around the `DBOS.launch()` boundary. Don't touch production for it until the test reproduces.
+- **Custom SMTP for Supabase Auth.** The built-in sender allows ~2 emails/hour, is best-effort and not meant for production; email is the recovery path into the ops console. Same tier as the remaining #1a hardening.
+- **Cross-session auth checks (manual, real devices).** (a) Sign out on PC, phone stays signed in, and the reverse. (b) Agent Ops sign-out leaves Link Hoarder signed in. (c) Audit Link Hoarder (and anything else on this Supabase project) for bare `signOut()` calls, which default to global scope.
+
+### Auth rule (phone app), from INC-2026-10-27
+
+An API 401 never signs the user out directly: 401 → refresh session (single-flight: one refresh shared by every waiting request) → retry once → refresh ok: continue; session really gone: sign out **locally**. Never call `signOut()` without `{ scope: 'local' }`: the supabase-js default is global and revokes every session of the account on every device and in every app on the same Supabase project. Implemented in `public/session.js`, enforced by `scripts/test-session.ts` in CI.
+
+INC-2026-10-27: during push validation a resumed PC app sent an expired access token; the 401 handler called the global `signOut()`, which revoked the phone's session too (Supabase auth logs: `/user` 403 token expired → `/logout` 204 → other device `session_not_found`). Fixed in #13.
 
 ### Decisions recorded at Lock
 

@@ -44,6 +44,7 @@ const APP_MANIFEST = JSON.stringify({
   ],
 });
 const APP_SW = fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
+const APP_SESSION_JS = fs.readFileSync(new URL('../public/session.js', import.meta.url), 'utf8');
 const APP_ICONS = new Map(fs.readdirSync(new URL('../public/icons/', import.meta.url))
   .filter((f) => f.endsWith('.png')).map((f) => [f, fs.readFileSync(new URL(`../public/icons/${f}`, import.meta.url))]));
 
@@ -164,6 +165,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/app/config') {
       const pushKey = process.env.CONNECTION_KEY ? (await vapidKeys().catch(() => undefined))?.publicKey ?? null : null;
       return send(res, 200, { ...publicAuthConfig(), pushPublicKey: pushKey });
+    }
+    if (req.method === 'GET' && url.pathname === '/app/session.js') {
+      return res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' }).end(APP_SESSION_JS);
     }
     if (req.method === 'GET' && url.pathname === '/app/sw.js') {
       return res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' }).end(APP_SW);

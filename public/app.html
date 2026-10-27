@@ -93,6 +93,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module">
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+import { AuthError, createSessionApi } from '/app/session.js';
 
 const $view = document.getElementById('view');
 const cfg = await (await fetch('/app/config')).json();
@@ -137,18 +138,8 @@ const enc = encodeURIComponent;
 
 // ---------- API ----------
 let session = null;
-class AuthError extends Error {}
-async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    method: opts.method ?? 'GET',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${session?.access_token ?? ''}` },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (res.status === 401) { await sb?.auth.signOut(); session = null; throw new AuthError('Signed out'); }
-  if (res.status === 403) throw new AuthError(body.error ?? 'Not authorized');
-  return { status: res.status, body };
-}
+// Auth rule: a 401 never signs out directly; see /app/session.js.
+const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; } });
 
 // ---------- screens ----------
 function loginScreen(note) {
@@ -360,7 +351,7 @@ async function agents() {
       } }, 'Run now')) : null)),
     await notificationsCard(),
     h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
-      h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await sb.auth.signOut(); session = null; route(); } }, 'Sign out')),
+      h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await signOutHere(); route(); } }, 'Sign out')),
   );
 }
 

@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Phone-app auth rule: an API 401 never signs out directly (public/session.js). Pure Node, fast.
+      - run: npx tsx scripts/test-session.ts
 
   # The DBOS durability/recovery regression suite (docs/closeout.md, t1–t8). Required whenever
   # runtime or recovery code changes: it kills real processes mid-workflow against real Postgres.
