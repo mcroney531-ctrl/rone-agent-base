@@ -10,6 +10,7 @@ import {
   AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
 import { deeperPrep } from './calendarPrep.js';
+import { briefView, setFeedback } from './briefs.js';
 import { authenticate, callerLabel, publicAuthConfig } from './auth.js';
 import { actOnAttention, attentionDetail, listAgents, listAttention, runAgentNow } from './attention.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
@@ -50,6 +51,7 @@ await applySql('003_connections.sql');
 await applySql('004_calendar_prep.sql');
 await applySql('005_attention.sql');
 await applySql('006_prep_holds.sql');
+await applySql('007_brief_view.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -257,21 +259,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && parts[0] === 'briefs' && parts[1] && !parts[2]) {
       const key = decodeURIComponent(parts[1]);
-      const byDate = /^\d{4}-\d{2}-\d{2}$/.test(key);
-      if (!byDate && !/^[0-9a-f-]{36}$/.test(key)) return send(res, 400, { error: 'expected YYYY-MM-DD or brief id' });
-      const { rows } = await pool.query(
-        `select b.*, b.brief_date::text as brief_date,
-                coalesce((select jsonb_object_agg(d.event_id, jsonb_build_object('content', d.content, 'workflowId', d.workflow_id))
-                            from ops.brief_deeper d where d.brief_id = b.id), '{}') as deeper,
-                coalesce((select jsonb_object_agg(f.event_id, f.verdict) from ops.brief_feedback f where f.brief_id = b.id), '{}') as feedback
-           from ops.briefs b
-          where ${byDate ? `b.brief_date = $1::date and b.agent_id = $2` : `b.id = $1::uuid`}`,
-        byDate ? [key, url.searchParams.get('agent') ?? 'calendar-prep'] : [key],
-      );
-      return rows[0] ? send(res, 200, rows[0]) : send(res, 404, { error: 'no brief' });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key) && !/^[0-9a-f-]{36}$/.test(key)) return send(res, 400, { error: 'expected YYYY-MM-DD or brief id' });
+      const view = await briefView(key, url.searchParams.get('agent') ?? 'calendar-prep');
+      return view ? send(res, 200, view) : send(res, 404, { error: 'no brief' });
     }
     if (req.method === 'POST' && parts[0] === 'briefs' && parts[1] && parts[2] === 'seen' && !parts[3]) {
       const { rowCount } = await pool.query(`update ops.briefs set seen_at = coalesce(seen_at, now()) where id = $1::uuid`, [parts[1]]);
+      // Opening the brief also acknowledges any finished deeper prep shown on it.
+      await pool.query(`update ops.brief_deeper set seen_at = now() where brief_id = $1::uuid and content is not null and seen_at is null`, [parts[1]]);
       return send(res, rowCount ? 200 : 404, { ok: Boolean(rowCount) });
     }
     // POST /briefs/:id/items/:eventId/deeper | /feedback {verdict}
@@ -285,18 +280,16 @@ const server = http.createServer(async (req, res) => {
       );
       if (!rows[0]?.title) return send(res, 404, { error: 'no such brief item' });
       if (parts[4] === 'deeper') {
-        // One deeper pass per item: asking twice returns the same workflow.
-        const workflowID = `deeper-${briefId}-${eventId}`;
+        // One deeper pass per item: asking twice returns the same workflow; after a failure, a tap retries.
+        const { rows: [last] } = await pool.query(
+          `select workflow_id, run_state from ops.v_runs where workflow_id like $1 order by created_at desc limit 1`, [`deeper-${briefId}-${eventId}%`]);
+        const workflowID = last?.run_state === 'failed' ? `deeper-${briefId}-${eventId}-retry-${Date.now()}` : `deeper-${briefId}-${eventId}`;
         await DBOS.startWorkflow(deeperPrep, { workflowID, queueName: AGENT_QUEUE })(briefId, eventId);
         return send(res, 202, { workflowID });
       }
       const verdict = String((await readJson(req)).verdict ?? '');
-      if (!['useful', 'not_useful', 'dismissed'].includes(verdict)) return send(res, 400, { error: 'verdict must be useful | not_useful | dismissed' });
-      await pool.query(
-        `insert into ops.brief_feedback (brief_id, event_id, verdict, title) values ($1, $2, $3, $4)
-         on conflict (brief_id, event_id) do update set verdict = excluded.verdict, created_at = now()`,
-        [briefId, eventId, verdict, rows[0].title],
-      );
+      if (!['useful', 'not_useful', 'dismissed', 'clear'].includes(verdict)) return send(res, 400, { error: 'verdict must be useful | not_useful | dismissed | clear' });
+      await setFeedback(briefId, eventId, verdict as 'clear', rows[0].title);
       return send(res, 200, { ok: true, verdict });
     }
     // Manual and webhook triggers: thin handlers that start a workflow with a deterministic ID,

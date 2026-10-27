@@ -53,6 +53,7 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
     actions: () => [A.approve, A.reject],
   },
   brief_ready: { severity: 'info', title: () => 'Brief is ready', actions: () => [A.open, A.dismiss] },
+  deeper_ready: { severity: 'info', title: () => 'Deeper prep ready', actions: () => [A.open, A.dismiss] },
   connection_problem: {
     severity: 'problem',
     title: () => 'Connection needs attention',
@@ -179,6 +180,7 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
     case 'dismiss': {
       if (DECISION_KINDS.has(kind)) return { ok: false, status: 400, message: 'This needs a decision, not a dismissal.' };
       if (kind === 'brief_ready') await pool.query(`update ops.briefs set seen_at = coalesce(seen_at, now()) where id::text = $1`, [ref]);
+      else if (kind === 'deeper_ready') await pool.query(`update ops.brief_deeper set seen_at = now() where brief_id::text || '/' || event_id = $1`, [ref]);
       else await pool.query(
         `insert into ops.attention_acks (kind, ref, acked_by) values ($1, $2, $3)
          on conflict (kind, ref) do update set acked_at = now(), acked_by = excluded.acked_by`, [kind, ref, by]);
