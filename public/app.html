@@ -93,6 +93,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module">
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+import { AuthError, createSessionApi } from '/app/session.js';
 
 const $view = document.getElementById('view');
 const cfg = await (await fetch('/app/config')).json();
@@ -137,39 +138,8 @@ const enc = encodeURIComponent;
 
 // ---------- API ----------
 let session = null;
-class AuthError extends Error {}
-// Access tokens last an hour and phones freeze background pages, so a cached token is often stale on
-// resume. Always ask supabase-js for the session (it refreshes an expired one), retry a 401 once after
-// a forced refresh, and only then drop to sign-in. Never sign out globally: that would revoke every
-// session of this account on every device (and in any other app sharing the Supabase project).
-const signOutHere = async () => { try { await sb?.auth.signOut({ scope: 'local' }); } catch { /* already gone */ } session = null; };
-async function freshToken(force = false) {
-  if (!sb) return '';
-  if (force) {
-    const { data, error } = await sb.auth.refreshSession();
-    if (!error && data.session) session = data.session;
-    return error ? '' : (data.session?.access_token ?? '');
-  }
-  const { data } = await sb.auth.getSession();
-  session = data.session;
-  return data.session?.access_token ?? '';
-}
-async function api(path, opts = {}) {
-  const call = async (token) => fetch(path, {
-    method: opts.method ?? 'GET',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  let res = await call(await freshToken());
-  if (res.status === 401) {
-    const retried = await freshToken(true);
-    if (retried) res = await call(retried);
-  }
-  const body = await res.json().catch(() => ({}));
-  if (res.status === 401) { await signOutHere(); throw new AuthError('Your session ended. Sign in again.'); }
-  if (res.status === 403) throw new AuthError(body.error ?? 'Not authorized');
-  return { status: res.status, body };
-}
+// Auth rule: a 401 never signs out directly; see /app/session.js.
+const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; } });
 
 // ---------- screens ----------
 function loginScreen(note) {
