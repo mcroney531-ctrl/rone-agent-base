@@ -35,7 +35,8 @@ try {
   const shell = await call('GET', '/app/');
   const cfg = await call('GET', '/app/config');
   check('app shell + public config served without auth (no secrets in config)', shell.status === 200 && /Needs You/.test(shell.body)
-    && cfg.body.supabaseUrl === `${EXTERNALS}/supabase` && cfg.body.supabaseKey === 'sb_publishable_test' && Object.keys(cfg.body).length === 2, cfg.body);
+    && cfg.body.supabaseUrl === `${EXTERNALS}/supabase` && cfg.body.supabaseKey === 'sb_publishable_test'
+    && JSON.stringify(Object.keys(cfg.body).sort()) === '["pushPublicKey","supabaseKey","supabaseUrl"]', cfg.body);
 
   const noAuth = await call('GET', '/attention');
   const badSession = await call('GET', '/attention', 'expired-session');

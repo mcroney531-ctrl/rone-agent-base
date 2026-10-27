@@ -95,6 +95,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-mobile.ts
 
+      - name: Push notifications (fake push service, real encryption)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-push.ts
+
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4
