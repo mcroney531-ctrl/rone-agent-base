@@ -53,7 +53,7 @@ const EVENTS = [
     description: 'Agenda: renewal terms. Deck: https://docs.google.com/presentation/d/abc Join: https://meet.google.com/xyz',
   }),
   ev('int1', 'Team standup', 9, 15, { attendees: [me, { email: 'sam@example.com' }], recurringEventId: 'standup', organizer: { self: true } }),
-  ev('ext2', 'Intro: Lee (Foo Corp)', 15, 30, { attendees: [me, { email: 'lee@foo.io' }], description: 'Background: https://example.org/lee' }),
+  ev('ext2', 'Intro: Lee (Foo Corp)', 15, 30, { attendees: [me, { email: 'lee@foo.io' }], description: 'Background: https://example.org/lee', hangoutLink: 'https://meet.google.com/lee-call' }),
   ev('dec1', 'Vendor pitch', 11, 30, { attendees: [{ ...me, responseStatus: 'declined' }, { email: 'x@vendor.com' }] }),
   ev('foc1', 'Focus time', 13, 120, { eventType: 'focusTime' }),
   { id: 'bday1', summary: "Pat's birthday", eventType: 'birthday', start: { date: DATE }, end: { date: addDays(DATE, 1) } },
@@ -156,6 +156,8 @@ try {
   const b3 = (await w.http('GET', `/briefs/${b1.id}`)).body;
   check('request deeper prep stores a second pass on that item (idempotent request)', d1.status === 202 && d1.body.workflowID === d2.body.workflowID
     && /Mock deeper prep/.test(b3.deeper?.ext2?.content ?? ''), { d1: d1.body, deeper: b3.deeper });
+  check('deeper prep is told the video link and the hold\'s real status', /Video: https:\/\/meet\.google\.com\/lee-call/.test(b3.deeper?.ext2?.content ?? '')
+    && /Hold: rejected /.test(b3.deeper?.ext2?.content ?? ''), b3.deeper?.ext2?.content);
   const needsDeeper = ((await w.http('GET', '/attention')).body as any[]).find((i) => i.type === 'deeper_ready');
   check('"Deeper prep ready" appears in Needs You until the brief is opened', needsDeeper?.ref === `${b1.id}/ext2` && needsDeeper.actions.map((a: any) => a.id).join() === 'open,dismiss', needsDeeper);
   await w.http('POST', `/briefs/${b1.id}/seen`);

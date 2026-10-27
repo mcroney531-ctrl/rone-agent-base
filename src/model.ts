@@ -51,7 +51,12 @@ function scriptedMock() {
         content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
       });
       if (options.responseFormat?.type === 'json') return stop(JSON.stringify(mockRanking(promptText)));
-      if (promptText.includes('<deeper>')) return stop('## Context\nMock deeper prep.\n## Questions to ask\n- What does success look like?');
+      if (promptText.includes('<deeper>')) {
+        // Echo the context lines so tests can see what deeper prep was given.
+        const vc = /Video call: (.*)\.\n/.exec(promptText)?.[1];
+        const hold = /Prep hold: (.*)\.\n/.exec(promptText)?.[1];
+        return stop(`## Context\nMock deeper prep.\nVideo: ${vc}\nHold: ${hold}\n## Questions to ask\n- What does success look like?`);
+      }
 
       const call = (id: string, toolName: string, input: unknown) => ({
         type: 'tool-call' as const,

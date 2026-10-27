@@ -78,7 +78,7 @@
   .tag { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .ok { color: var(--ok); font-weight: 600; } .warn { color: var(--problem); }
   .deeper { background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; font-size: 15px; }
-  .deeper b { display: block; margin-top: 6px; }
+  .deeper { white-space: normal; } .deeper b { display: block; margin-top: 8px; } .deeper div { min-height: 1em; }
   .linkbtn { background: none; border: none; color: var(--accent); padding: 4px 0; min-height: 0; font-size: 14px; }
   .dismissed .kv { color: var(--muted); }
 </style>
@@ -258,7 +258,8 @@ async function brief(id) {
   const r = await api(`/briefs/${enc(id)}`);
   if (r.status !== 200) return render(h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), h('div', { class: 'empty' }, 'Brief not found.'));
   const b = r.body;
-  api(`/briefs/${b.id}/seen`, { method: 'POST' }).catch(() => undefined);
+  // Opening the brief clears its Needs You items; refresh the badge so it doesn't lag behind.
+  api(`/briefs/${b.id}/seen`, { method: 'POST' }).then(() => api('/attention')).then((x) => setBadge(x.body.length)).catch(() => undefined);
   const route0 = location.hash;
   const again = () => { if (location.hash === route0) brief(id); };
   const tz = b.timezone;
@@ -295,9 +296,12 @@ async function brief(id) {
     return [toggle, list];
   };
 
-  // Light rendering of the deeper-prep markdown: "## Heading" → bold line, everything else as text.
+  // Light rendering of the deeper-prep markdown: "## Heading" → bold line, "- x" → bullet, **bold** inline.
+  const inline = (text) => text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean)
+    .map((part) => (/^\*\*[^*]+\*\*$/.test(part) ? h('strong', {}, part.slice(2, -2)) : part));
   const deeperBox = (text) => h('div', { class: 'deeper' }, ...text.split('\n').map((line) =>
-    /^#{1,6}\s/.test(line) ? h('b', {}, line.replace(/^#{1,6}\s/, '')) : `${line.replace(/^[-*]\s/, '• ')}\n`));
+    /^#{1,6}\s/.test(line) ? h('b', {}, line.replace(/^#{1,6}\s/, ''))
+      : h('div', {}, ...inline(line.replace(/^\s*[-*]\s/, '• ')))));
 
   const card = (c) => {
     const box = c.deeper.status === 'ready' ? deeperBox(c.deeper.content) : null;
@@ -323,7 +327,9 @@ async function brief(id) {
     h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'),
     h('div', { class: 'src' }, h('span', {}, day), h('span', {}, `${b.cards.length} to prep · ${b.considered} considered`)),
     h('h2', {}, b.headline ?? 'Brief'),
-    ...(b.cards.length ? b.cards.map(card) : [h('div', { class: 'empty' }, h('b', {}, 'Nothing to prepare for'), 'Enjoy the day.')]),
+    ...(b.cards.length ? b.cards.map(card)
+      : b.dismissedCards.length ? [h('div', { class: 'empty' }, h('b', {}, 'All meetings marked not useful'), 'Undo below to bring one back.')]
+      : [h('div', { class: 'empty' }, h('b', {}, 'Nothing to prepare for'), 'Enjoy the day.')]),
     b.dismissedCards.length ? h('div', { class: 'card dismissed' },
       h('div', { class: 'label', style: 'margin-top:0' }, `Not useful · ${b.dismissedCards.length}`),
       ...b.dismissedCards.map((d) => h('div', { class: 'kv' }, h('span', {}, `${d.title} · ${d.localStart ?? 'All day'}`),
