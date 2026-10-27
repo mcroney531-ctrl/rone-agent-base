@@ -156,6 +156,10 @@ try {
   const b3 = (await w.http('GET', `/briefs/${b1.id}`)).body;
   check('request deeper prep stores a second pass on that item (idempotent request)', d1.status === 202 && d1.body.workflowID === d2.body.workflowID
     && /Mock deeper prep/.test(b3.deeper?.ext2?.content ?? ''), { d1: d1.body, deeper: b3.deeper });
+  const needsDeeper = ((await w.http('GET', '/attention')).body as any[]).find((i) => i.type === 'deeper_ready');
+  check('"Deeper prep ready" appears in Needs You until the brief is opened', needsDeeper?.ref === `${b1.id}/ext2` && needsDeeper.actions.map((a: any) => a.id).join() === 'open,dismiss', needsDeeper);
+  await w.http('POST', `/briefs/${b1.id}/seen`);
+  check('…and opening the brief clears it', !((await w.http('GET', '/attention')).body as any[]).some((i) => i.type === 'deeper_ready'));
   const bad = await w.http('POST', `/briefs/${b1.id}/items/int1/deeper`);
   check('deeper prep only for items in the brief', bad.status === 404, bad);
 
@@ -180,6 +184,41 @@ try {
   check('rerun: one mirror, updated in place; opened brief stays opened', bS.mirror_event_id === b1.mirror_event_id && bS.seen_at !== null
     && (after.appEvents[cal.id] as any[]).filter((e) => /^Prep brief/.test(e.summary) && e.status !== 'cancelled').length === 1
     && after.eventsInserted === before.eventsInserted, { inserted: [before.eventsInserted, after.eventsInserted] });
+
+  // ---- the meeting-card view: owner state joined onto the brief, provenance-labelled sources ----
+  const card = (v: any, id: string) => v.cards.find((c: any) => c.eventId === id);
+  check('card view: "Not useful" collapses the meeting into the dismissed section', !card(bS, 'ext2') && bS.dismissedCards.some((d: any) => d.eventId === 'ext2') && bS.editable, { cards: bS.cards.map((c: any) => c.eventId), dismissed: bS.dismissedCards });
+  const c1 = card(bS, 'ext1');
+  check('card view: hold status comes from the ACTION (approved ✓), not the brief text', c1?.hold?.status === 'approved' && c1.hold.actionId === h1.id, c1?.hold);
+  check('card view: sources are event links only, labelled by provenance; meeting links excluded', JSON.stringify(c1?.sources) === JSON.stringify([
+    { url: 'https://docs.google.com/presentation/d/abc', label: 'Google Slides', provenance: 'event' }]), c1?.sources);
+  await w.http('POST', `/briefs/${b1.id}/items/ext2/feedback`, { verdict: 'clear' });
+  const bU = (await w.http('GET', `/briefs/${DATE}`)).body;
+  const c2 = card(bU, 'ext2');
+  check('Undo restores the card with its history (rejected hold, deeper prep)', c2?.hold?.status === 'rejected' && c2.deeper.status === 'ready'
+    && /Mock deeper prep/.test(c2.deeper.content) && bU.dismissedCards.length === 0, c2);
+
+  {
+    const D3 = '2026-11-05';
+    const ev3 = { id: 'nu1', summary: 'Vendor demo', status: 'confirmed', start: { dateTime: zonedTime(D3, '15:00', TZ).toISOString() },
+      end: { dateTime: zonedTime(D3, '16:00', TZ).toISOString() }, attendees: [me, { email: 'sales@vendor.io' }], description: 'Deck: https://example.org/deck' };
+    await fetch(`${EXTERNALS}/google/admin/events`, { method: 'POST', body: JSON.stringify([ev3]) });
+    const run = async (rid: string) => {
+      const r = await w.http('POST', '/agents/calendar-prep/run', { requestId: rid, date: D3 });
+      await waitFor(rid, async () => Boolean((await one(db, `select outcome from ops.runs where workflow_id = $1`, [r.body.workflowID]))?.outcome), 30_000);
+    };
+    await run('d3-a');
+    const v3 = (await w.http('GET', `/briefs/${D3}`)).body;
+    const pend = card(v3, 'nu1')?.hold;
+    check('card view: a pending hold carries its ACTION id for inline Approve/Reject', pend?.status === 'pending' && Boolean(pend.actionId), pend);
+    await w.http('POST', `/briefs/${v3.id}/items/nu1/feedback`, { verdict: 'not_useful' });
+    const after = await one(db, `select status, error from ops.actions where id = $1`, [pend?.actionId]);
+    const approvals = ((await w.http('GET', '/attention')).body as any[]).filter((i) => i.type === 'approval_needed' && i.ref === pend?.actionId);
+    check('"Not useful" withdraws the undecided hold (gone from Needs You)', after.status === 'superseded' && approvals.length === 0, after);
+    await run('d3-b');
+    const n3 = await one(db, `select count(*)::int n from ops.actions where target = 'nu1' and status = 'pending_approval'`);
+    check('…and the next run does not propose one for that meeting again', n3.n === 0, n3);
+  }
 
   // ---- approval long after the proposal: the slot is re-checked when the action executes ----
   const D2 = '2026-11-03';

@@ -158,5 +158,10 @@ select 'brief_mirror_failed', b.id::text, b.agent_id, b.updated_at,
   from ops.briefs b
  where b.mirror_status = 'failed' and b.brief_date >= (now() at time zone b.timezone)::date
 union all
+select 'deeper_ready', d.brief_id::text || '/' || d.event_id, b.agent_id, d.created_at,
+       coalesce((select i->>'title' from jsonb_array_elements(b.items) i where i->>'eventId' = d.event_id), d.event_id)
+  from ops.brief_deeper d join ops.briefs b on b.id = d.brief_id
+ where d.content is not null and d.seen_at is null and b.brief_date >= (now() at time zone b.timezone)::date
+union all
 select 'executor_unreaped', e.executor_id, null, e.last_seen_at, 'stale heartbeat, not yet reaped — is any worker alive?'
   from ops.executors e where e.reaped_at is null and e.last_seen_at < now() - interval '2 minutes';

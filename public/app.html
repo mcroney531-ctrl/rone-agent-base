@@ -67,6 +67,20 @@
   .pill.healthy { color: var(--ok); } .pill.failing, .pill.blocked { color: var(--problem); }
   ul.items { list-style: none; padding: 0; margin: 0; }
   ul.items li { padding: 10px 0; border-top: 1px solid var(--line); } ul.items li:first-child { border-top: 0; }
+  /* brief cards */
+  .meeting .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .meeting .head .title { font-size: 17px; margin: 0; }
+  .meeting .head .muted { white-space: nowrap; }
+  .label { font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 12px 0 2px; }
+  .bullets { margin: 0; padding-left: 18px; } .bullets li { margin: 2px 0; }
+  .kv { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; }
+  .kv a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  .tag { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .ok { color: var(--ok); font-weight: 600; } .warn { color: var(--problem); }
+  .deeper { background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; font-size: 15px; }
+  .deeper b { display: block; margin-top: 6px; }
+  .linkbtn { background: none; border: none; color: var(--accent); padding: 4px 0; min-height: 0; font-size: 14px; }
+  .dismissed .kv { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -179,7 +193,10 @@ function actionButtons(item, after) {
     class: a.style ?? '',
     onclick: async (e) => {
       e.stopPropagation();
-      if (a.id === 'open') return go(item.type.startsWith('brief') ? `#/brief/${enc(item.ref)}` : `#/item/${enc(item.type)}/${enc(item.ref)}`);
+      if (a.id === 'open') {
+        if (item.type === 'deeper_ready') return go(`#/brief/${enc(item.ref.split('/')[0])}`);
+        return go(item.type.startsWith('brief') ? `#/brief/${enc(item.ref)}` : `#/item/${enc(item.type)}/${enc(item.ref)}`);
+      }
       if (a.id === 'reject' && !confirm(`Reject "${item.title}"?`)) return;
       e.currentTarget.disabled = true;
       try {
@@ -234,21 +251,86 @@ async function briefs() {
   );
 }
 
-// Deliberately plain until the first real brief shapes the real view.
+// One card per meeting worth preparing for. Scan → understand why → act, in seconds.
+let briefTimer;
 async function brief(id) {
+  clearTimeout(briefTimer);
   const r = await api(`/briefs/${enc(id)}`);
   if (r.status !== 200) return render(h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'), h('div', { class: 'empty' }, 'Brief not found.'));
   const b = r.body;
-  if (!b.seen_at) api(`/briefs/${b.id}/seen`, { method: 'POST' }).catch(() => undefined);
+  api(`/briefs/${b.id}/seen`, { method: 'POST' }).catch(() => undefined);
+  const route0 = location.hash;
+  const again = () => { if (location.hash === route0) brief(id); };
+  const tz = b.timezone;
+  const time = (iso) => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz });
+  const range = (s, e) => `${time(s)}–${time(e)}`;
+  const day = new Date(`${b.brief_date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const post = async (path, body) => { try { const x = await api(path, { method: 'POST', body: body ?? {} }); if (x.body?.message) toast(x.body.message); } catch (err) { handleErr(err); } again(); };
+
+  const holdRow = (c) => {
+    const hd = c.hold;
+    if (!hd) return c.holdNote && c.holdNote !== 'Marked not useful'
+      ? [h('div', { class: 'label' }, 'Prep hold'), h('div', { class: 'muted' }, c.holdNote)] : [];
+    const right = {
+      pending: () => h('span', { class: 'actions', style: 'margin:0' },
+        h('button', { class: 'primary', onclick: (e) => { e.currentTarget.disabled = true; post(`/attention/approval_needed/${hd.actionId}/approve`, { requestId: rid() }); } }, 'Approve'),
+        h('button', { class: 'danger', onclick: (e) => { e.currentTarget.disabled = true; post(`/attention/approval_needed/${hd.actionId}/reject`, { requestId: rid() }); } }, 'Reject')),
+      approving: () => h('span', { class: 'tag' }, 'Approving…'),
+      approved: () => h('span', { class: 'ok' }, 'Approved ✓'),
+      rejected: () => h('span', { class: 'tag' }, 'Rejected'),
+      failed: () => h('span', { class: 'warn' }, 'No longer fits'),
+    }[hd.status]();
+    return [h('div', { class: 'label' }, 'Prep hold'), h('div', { class: 'kv' }, h('span', {}, range(hd.start, hd.end)), right),
+      hd.note && hd.status !== 'failed' ? h('div', { class: 'muted' }, hd.note) : null,
+      hd.status === 'failed' && hd.note ? h('div', { class: 'muted' }, hd.note) : null];
+  };
+
+  const sourcesBlock = (c) => {
+    if (!c.sources.length) return [];
+    const row = (s) => h('div', { class: 'kv' }, h('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer' }, `${s.label} ↗`),
+      h('span', { class: 'tag' }, s.provenance === 'event' ? 'Event' : 'Used for prep'));
+    if (c.sources.length <= 2) return [h('div', { class: 'label' }, 'Sources'), ...c.sources.map(row)];
+    const list = h('div', { hidden: true }, ...c.sources.map(row));
+    const toggle = h('button', { class: 'linkbtn', onclick: () => { list.hidden = !list.hidden; toggle.textContent = `${list.hidden ? '▸' : '▾'} Sources (${c.sources.length})`; } }, `▸ Sources (${c.sources.length})`);
+    return [toggle, list];
+  };
+
+  // Light rendering of the deeper-prep markdown: "## Heading" → bold line, everything else as text.
+  const deeperBox = (text) => h('div', { class: 'deeper' }, ...text.split('\n').map((line) =>
+    /^#{1,6}\s/.test(line) ? h('b', {}, line.replace(/^#{1,6}\s/, '')) : `${line.replace(/^[-*]\s/, '• ')}\n`));
+
+  const card = (c) => {
+    const box = c.deeper.status === 'ready' ? deeperBox(c.deeper.content) : null;
+    if (box) box.hidden = true;
+    const deeperBtn = {
+      none: () => h('button', { onclick: (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = 'Preparing…'; post(`/briefs/${b.id}/items/${enc(c.eventId)}/deeper`); } }, 'Deeper prep'),
+      preparing: () => h('button', { disabled: true }, 'Preparing…'),
+      ready: () => h('button', { onclick: (e) => { box.hidden = !box.hidden; e.currentTarget.textContent = box.hidden ? 'Deeper prep ✓' : 'Hide deeper prep'; } }, 'Deeper prep ✓'),
+      failed: () => h('button', { onclick: () => post(`/briefs/${b.id}/items/${enc(c.eventId)}/deeper`) }, 'Retry deeper prep'),
+    }[c.deeper.status]();
+    return h('div', { class: 'card meeting' },
+      h('div', { class: 'head' }, h('p', { class: 'title' }, c.title), h('span', { class: 'muted' }, c.localStart ?? 'All day')),
+      h('div', { class: 'label' }, 'Why prep'), h('div', {}, c.why),
+      c.prep.length ? [h('div', { class: 'label' }, 'Prep'), h('ul', { class: 'bullets' }, c.prep.map((p) => h('li', {}, p)))] : null,
+      ...sourcesBlock(c),
+      ...holdRow(c),
+      h('div', { class: 'actions' }, deeperBtn,
+        b.editable ? h('button', { onclick: (e) => { e.currentTarget.disabled = true; post(`/briefs/${b.id}/items/${enc(c.eventId)}/feedback`, { verdict: 'not_useful' }); } }, 'Not useful') : null),
+      box);
+  };
+
   render(
     h('button', { class: 'back', onclick: () => history.back() }, '‹ Back'),
-    h('div', { class: 'src' }, h('span', {}, b.brief_date), h('span', {}, `${b.items.length} of ${b.considered} events`)),
+    h('div', { class: 'src' }, h('span', {}, day), h('span', {}, `${b.cards.length} to prep · ${b.considered} considered`)),
     h('h2', {}, b.headline ?? 'Brief'),
-    h('div', { class: 'card' }, b.items.length ? h('ul', { class: 'items' }, b.items.map((i) => h('li', {},
-      h('div', { class: 'row' }, h('span', { class: 'title' }, i.title), h('span', { class: 'muted' }, i.localStart ?? 'All day')),
-      h('div', { class: 'summary' }, i.why),
-      i.prep?.length ? h('div', { class: 'summary' }, i.prep.map((p) => `• ${p}`).join('\n')) : null))) : h('p', { class: 'muted' }, 'Nothing worth preparing for.')),
+    ...(b.cards.length ? b.cards.map(card) : [h('div', { class: 'empty' }, h('b', {}, 'Nothing to prepare for'), 'Enjoy the day.')]),
+    b.dismissedCards.length ? h('div', { class: 'card dismissed' },
+      h('div', { class: 'label', style: 'margin-top:0' }, `Not useful · ${b.dismissedCards.length}`),
+      ...b.dismissedCards.map((d) => h('div', { class: 'kv' }, h('span', {}, `${d.title} · ${d.localStart ?? 'All day'}`),
+        b.editable ? h('button', { class: 'linkbtn', onclick: () => post(`/briefs/${b.id}/items/${enc(d.eventId)}/feedback`, { verdict: 'clear' }) }, 'Undo') : null))) : null,
   );
+  // While a deeper pass or an approval is in flight, quietly refresh; leaving the screen stops it.
+  if (b.cards.some((c) => c.deeper.status === 'preparing' || c.hold?.status === 'approving')) briefTimer = setTimeout(again, 4000);
 }
 
 async function agents() {
