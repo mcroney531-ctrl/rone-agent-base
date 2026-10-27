@@ -80,5 +80,21 @@ const fakeFetch = async (path: string, init: { headers: Record<string, string> }
   check('Sign out (even double-tapped) → one local sign-out', JSON.stringify(sb.state.signOuts) === '["local"]', sb.state.signOuts);
 }
 
+// 6. Stale-tab guard: no request leaves until the build check (beforeRequest) settles.
+{
+  const sb = fakeSupabase({ token: 'fresh-0', refreshOk: true });
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const { api } = createSessionApi({ sb, beforeRequest: () => gate.then(() => { order.push('checked'); }),
+    fetchImpl: ((p: string, i: never) => { order.push('fetch'); return fakeFetch(p, i); }) as never });
+  const call = api('/attention');
+  await new Promise((r) => setTimeout(r, 20));
+  const heldBack = order.length === 0;
+  release();
+  await call;
+  check('API calls wait for the build check before going out', heldBack && order.join() === 'checked,fetch', order);
+}
+
 console.log(failures.length ? `\nFAILED: ${failures.length}` : '\nall session checks passed');
 process.exit(failures.length ? 1 : 0);

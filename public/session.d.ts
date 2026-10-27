@@ -5,6 +5,7 @@ export function createSessionApi(o: {
   fetchImpl?: (...a: any[]) => Promise<Response>;
   onSession?: (s: unknown) => void;
   reuseMs?: number;
+  beforeRequest?: () => Promise<unknown>;
 }): {
   api: (path: string, opts?: { method?: string; body?: unknown }) => Promise<{ status: number; body: any }>;
   signOutHere: () => Promise<void>;

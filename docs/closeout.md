@@ -34,6 +34,8 @@ An API 401 never signs the user out directly: 401 → refresh session (single-fl
 
 INC-2026-10-27: during push validation a resumed PC app sent an expired access token; the 401 handler called the global `signOut()`, which revoked the phone's session too (Supabase auth logs: `/user` 403 token expired → `/logout` 204 → other device `session_not_found`). Fixed in #13.
 
+Recurrence (same day, 16:33 UTC): a PC tab opened before the #13 deploy was still running the old code; on resume it hit the same 401 path and called `/logout?scope=global`, and the phone's next refresh got `refresh_token_not_found`. The fix was right but never reached that tab. Guard: `/app/config` carries a `build` id (hash of the served app code); on resume (`visibilitychange`, back/forward-cache `pageshow`) the app re-checks it and reloads before any API call goes out if the server has moved on (`beforeRequest` gate in `session.js`, tested in `test-session.ts`).
+
 ### Decisions recorded at Lock
 
 - **Takeover timing stays at 5s heartbeat / 30s dead-after** (~40s end-to-end, about six missed heartbeats before a reap). Prefer slower recovery over false reaps from Postgres, network or event-loop hiccups. Make it configurable per workload only when a latency-sensitive workload exists.
