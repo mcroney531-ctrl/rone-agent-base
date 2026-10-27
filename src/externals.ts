@@ -243,6 +243,7 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
 }
 
 const PUSHES: { id: string; headers: Record<string, string>; body: string }[] = [];
+const FLAKY = { count: 0 };
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -264,11 +265,13 @@ http
       // Fake push service: records encrypted Web Push deliveries; endpoint id 'gone' answers 410.
       if (path.startsWith('/push/')) {
         if (path === '/push/admin/received') return send(res, 200, PUSHES);
-        if (path === '/push/admin/reset' && req.method === 'POST') { PUSHES.length = 0; return send(res, 200, { ok: true }); }
+        if (path === '/push/admin/reset' && req.method === 'POST') { PUSHES.length = 0; FLAKY.count = 0; return send(res, 200, { ok: true }); }
         const id = path.split('/')[3]; // /push/recv/<id>
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
         if (id === 'gone') return send(res, 410, { error: 'subscription expired' });
+        if (id === 'flaky' && (FLAKY.count++ < 2)) return send(res, 503, { error: 'try again' }); // transient, twice
+
         PUSHES.push({ id, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks).toString('base64') });
         return res.writeHead(201).end();
       }

@@ -130,38 +130,95 @@ export function deepLink(i: AttentionItem): string {
   return `/app/#/item/${encodeURIComponent(i.type)}/${encodeURIComponent(i.ref)}`;
 }
 
+// Lock-screen text stays modest: what kind of thing needs you, never meeting names or details. Those
+// appear after opening the authenticated app. Approvals share one notification that counts them.
+export function messageFor(item: AttentionItem, open: AttentionItem[]): PushMessage {
+  const base = { title: 'Agent Ops', kind: item.type, url: deepLink(item), tag: item.id };
+  switch (item.type) {
+    case 'approval_needed': {
+      const n = open.filter((i) => i.type === 'approval_needed').length;
+      return { ...base, tag: 'approval_needed', url: n === 1 ? deepLink(item) : '/app/#/', body: n === 1 ? '1 action needs your approval' : `${n} actions need your approval` };
+    }
+    case 'brief_ready': return { ...base, body: `${item.source} brief is ready` };
+    case 'deeper_ready': return { ...base, body: 'Deeper prep is ready' };
+    case 'connection_problem': return { ...base, body: `${item.source} connection needs attention` };
+    case 'run_failed': return { ...base, body: `${item.source}: a run failed` };
+    case 'action_failed': return { ...base, body: `${item.source}: an action could not be completed` };
+    default: return { ...base, body: `${item.source} needs attention` };
+  }
+}
+
+const MAX_ATTEMPTS = 8;
+const retryDelayMs = (attempts: number) =>
+  Math.min(Number(process.env.NOTIFY_RETRY_BASE_MS ?? 30_000) * 2 ** Math.max(attempts - 1, 0), 30 * 60_000);
+
 let ticking = false;
+// One delivery per (open item, device). Each device is retried on its own; a 404/410 retires only that
+// device. An item is done once every active device has it or is gone.
 export async function notifyTick(now = new Date()): Promise<number> {
   if (ticking) return 0;
   ticking = true;
   try {
-    const devices = await activeDevices();
-    if (!devices.length) return 0; // nothing is claimed while no device could receive it
+    if (!(await activeDevices()).length) return 0;
     const { rows: [cfg] } = await pool.query(`select value from ops.settings where key = 'notifications'`);
-    // Quiet hours defer delivery; nothing is claimed, so it goes out when the window ends if still open.
+    // Quiet hours: nothing is claimed or sent; pending deliveries go out when the window ends if still open.
     if (cfg && inQuietHours(now, cfg.value)) return 0;
-    let sent = 0;
-    for (const item of (await listAttention()).filter((i) => PUSH_KINDS.has(i.type))) {
-      // Claim (kind, ref, since): exactly one worker wins per new or re-raised item.
-      const { rowCount } = await pool.query(
-        `insert into ops.attention_notifications (kind, ref, since) values ($1, $2, $3)
-         on conflict (kind, ref) do update set since = excluded.since, notified_at = now()
-           where ops.attention_notifications.since < excluded.since`,
-        [item.type, item.ref, item.createdAt],
-      );
-      if (!rowCount) continue;
-      const msg: PushMessage = {
-        title: `${item.source}: ${item.title}`.slice(0, 80), body: item.summary.slice(0, 180), tag: item.id, url: deepLink(item), kind: item.type,
-      };
-      const results = await Promise.all(devices.map((d) => sendTo(d, msg)));
-      sent += results.filter((r) => r === 'sent').length;
-      // Nobody got it and the failure was transient (push service down, network): release the claim so
-      // the next tick retries instead of silently dropping the notification.
-      if (!results.includes('sent') && results.includes('failed')) {
-        await pool.query(`delete from ops.attention_notifications where kind = $1 and ref = $2 and since = $3`, [item.type, item.ref, item.createdAt]);
+    const open = (await listAttention()).filter((i) => PUSH_KINDS.has(i.type));
+    if (!open.length) return 0;
+    const kinds = open.map((i) => i.type);
+    const refs = open.map((i) => i.ref);
+
+    // Plan: a delivery per (item, device), for items raised after the device subscribed (turning
+    // notifications on doesn't replay the backlog). A re-raised item (newer `since`) starts over.
+    await pool.query(
+      `insert into ops.notification_deliveries (kind, ref, device_id, since)
+       select i.kind, i.ref, d.id, i.since
+         from unnest($1::text[], $2::text[], $3::timestamptz[]) as i(kind, ref, since)
+         join ops.push_devices d on d.disabled_at is null and i.since >= d.created_at
+       on conflict (kind, ref, device_id) do update set since = excluded.since, status = 'pending', attempts = 0,
+         next_attempt_at = now(), last_error = null, sent_at = null
+         where ops.notification_deliveries.since < excluded.since`,
+      [kinds, refs, open.map((i) => i.createdAt)],
+    );
+
+    // Claim due deliveries of still-open items. The lease (next_attempt_at pushed out) makes this safe
+    // across replicas and lets a crashed worker's claim expire into a retry.
+    const { rows: due } = await pool.query(
+      `update ops.notification_deliveries d set next_attempt_at = now() + interval '2 minutes', attempts = d.attempts + 1
+        where (d.kind, d.ref, d.device_id) in (
+          select x.kind, x.ref, x.device_id
+            from ops.notification_deliveries x
+            join unnest($1::text[], $2::text[]) as i(kind, ref) on i.kind = x.kind and i.ref = x.ref
+            join ops.push_devices p on p.id = x.device_id and p.disabled_at is null
+           where x.status in ('pending', 'failed') and x.next_attempt_at <= now()
+           for update of x skip locked)
+        returning d.kind, d.ref, d.device_id, d.attempts`,
+      [kinds, refs],
+    );
+    if (!due.length) return 0;
+
+    const devices = new Map((await activeDevices()).map((d) => [d.id, d]));
+    const byId = new Map(open.map((i) => [`${i.type}:${i.ref}`, i]));
+    const results = await Promise.all(due.map(async (r) => {
+      const item = byId.get(`${r.kind}:${r.ref}`)!;
+      const device = devices.get(r.device_id);
+      const outcome = device ? await sendTo(device, messageFor(item, open)) : 'gone';
+      if (outcome === 'sent') {
+        await pool.query(`update ops.notification_deliveries set status = 'sent', sent_at = now(), last_error = null where kind = $1 and ref = $2 and device_id = $3`, [r.kind, r.ref, r.device_id]);
+      } else if (outcome === 'gone') {
+        await pool.query(`update ops.notification_deliveries set status = 'gone' where kind = $1 and ref = $2 and device_id = $3`, [r.kind, r.ref, r.device_id]);
+      } else {
+        const giveUp = r.attempts >= MAX_ATTEMPTS;
+        await pool.query(
+          `update ops.notification_deliveries set status = $4, next_attempt_at = now() + ($5 || ' milliseconds')::interval,
+                  last_error = (select last_error from ops.push_devices where id = $3)
+            where kind = $1 and ref = $2 and device_id = $3`,
+          [r.kind, r.ref, r.device_id, giveUp ? 'abandoned' : 'failed', String(retryDelayMs(r.attempts))],
+        );
       }
-    }
-    return sent;
+      return outcome;
+    }));
+    return results.filter((o) => o === 'sent').length;
   } finally {
     ticking = false;
   }
