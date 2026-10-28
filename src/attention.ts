@@ -188,6 +188,7 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
     }
     case 'run_now': {
       if (!row.agent_id) return { ok: false, status: 400, message: 'No agent to run.' };
+      try { await assertNotPaused(row.agent_id); } catch (e) { return { ok: false, status: 409, message: (e as Error).message }; }
       const r = await runAgentNow(row.agent_id, requestId);
       return { ok: true, status: 202, message: 'Started.', workflowId: r.workflowId };
     }
@@ -199,8 +200,27 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
   return { ok: false, status: 400, message: 'Unknown action.' };
 }
 
+export class AgentPausedError extends Error {}
+// A paused agent starts no new runs from any trigger (schedule skips are handled in scheduledAgentRun).
+export async function assertNotPaused(agentId: string) {
+  const { rows } = await pool.query(`select paused_at from ops.agents where id = $1`, [agentId]);
+  if (rows[0]?.paused_at) throw new AgentPausedError(`${humanize(agentId)} is paused. Resume it to run.`);
+}
+
+// Pause/resume are idempotent: pausing a paused agent keeps the original time and who did it.
+export async function setPaused(agentId: string, paused: boolean, by: string): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    paused
+      ? `update ops.agents set paused_at = coalesce(paused_at, now()), paused_by = coalesce(paused_by, $2), updated_at = now() where id = $1`
+      : `update ops.agents set paused_at = null, paused_by = null, updated_at = now() where id = $1`,
+    paused ? [agentId, by] : [agentId],
+  );
+  return rowCount === 1;
+}
+
 // Same deterministic-ID rule as POST /agents/:id/run: one tap (one requestId) = one run, however often it's retried.
 export async function runAgentNow(agentId: string, requestId?: string): Promise<{ workflowId: string }> {
+  await assertNotPaused(agentId);
   const rid = requestId && /^[\w.:-]{1,128}$/.test(requestId) ? requestId : crypto.randomUUID();
   const workflowId = `manual-${agentId}-${rid}`;
   await DBOS.startWorkflow(agentRun, { workflowID: workflowId, queueName: AGENT_QUEUE })(agentId, { type: 'manual', sourceEvent: rid });
@@ -209,7 +229,8 @@ export async function runAgentNow(agentId: string, requestId?: string): Promise<
 
 export async function listAgents() {
   const { rows } = await pool.query(
-    `select a.id, a.enabled, a.schedule, a.timezone, a.handler, h.health_state, h.last_outcome, h.last_finished_at,
+    `select a.id, a.enabled, a.schedule, a.timezone, a.handler, a.paused_at, a.paused_by, a.last_skipped_at,
+            h.health_state, h.last_outcome, h.last_finished_at,
             h.last_error_class, h.pending_approvals, h.blocked_connections
        from ops.agents a left join ops.agent_health h on h.agent_id = a.id
       order by a.enabled desc, a.id`,

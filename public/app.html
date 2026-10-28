@@ -57,6 +57,7 @@
   .empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 4px; }
   dl { margin: 0; } dt { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 12px; }
   dd { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  main a { color: var(--accent); }
   .back { color: var(--accent); background: none; border: none; padding: 8px 0; min-height: 0; }
   nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, .94); backdrop-filter: blur(10px); border-top: 1px solid var(--line);
              display: flex; padding-bottom: env(safe-area-inset-bottom); }
@@ -72,7 +73,10 @@
   .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .muted { color: var(--muted); font-size: 14px; }
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
-  .pill.healthy { color: var(--ok); } .pill.failing, .pill.blocked { color: var(--problem); }
+  .pill.healthy { color: var(--ok); } .pill.failing, .pill.blocked, .pill.degraded { color: var(--problem); }
+  .pill.paused { color: var(--muted); border-style: dashed; } .pill.decision { color: var(--accent); text-decoration: none; }
+  .strip { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 14px; }
+  .card.paused { background: var(--soft); }
   ul.items { list-style: none; padding: 0; margin: 0; }
   ul.items li { padding: 10px 0; border-top: 1px solid var(--line); } ul.items li:first-child { border-top: 0; }
   /* brief cards */
@@ -354,25 +358,55 @@ async function brief(id) {
   if (b.cards.some((c) => c.deeper.status === 'preparing' || c.hold?.status === 'approving')) briefTimer = setTimeout(again, 4000);
 }
 
+// Health strip: one glance at the whole fleet before the per-agent cards.
+const ATTENTION_STATES = new Set(['failing', 'degraded', 'blocked']);
+function healthStrip(list) {
+  const on = list.filter((a) => a.enabled);
+  const n = (f) => on.filter(f).length;
+  const chips = [
+    [n((a) => a.health_state === 'healthy'), 'healthy', 'healthy'],
+    [n((a) => ATTENTION_STATES.has(a.health_state)), 'need attention', 'failing'],
+    [n((a) => a.health_state === 'paused'), 'paused', 'paused'],
+    [n((a) => !a.health_state || a.health_state === 'idle'), 'idle', ''],
+  ].filter(([c]) => c > 0);
+  const approvals = on.reduce((t, a) => t + Number(a.pending_approvals ?? 0), 0);
+  return h('div', { class: 'strip' },
+    chips.map(([c, label, cls]) => h('span', { class: `pill ${cls}` }, `${c} ${label}`)),
+    approvals ? h('a', { class: 'pill decision', href: '#/' }, `${approvals} awaiting you`) : null);
+}
+
+function agentStatusLine(a) {
+  if (a.paused_at) {
+    const skipped = a.last_skipped_at && Date.parse(a.last_skipped_at) >= Date.parse(a.paused_at);
+    return `Paused ${ago(a.paused_at)}${skipped ? ` · skipped a run ${ago(a.last_skipped_at)}` : a.schedule ? ' · scheduled runs will be skipped' : ''}`;
+  }
+  return [a.schedule ? describeSchedule(a.schedule, a.timezone) : 'Manual only',
+    a.last_finished_at ? ` · last run ${ago(a.last_finished_at)}${a.last_outcome ? ` (${a.last_outcome})` : ''}` : ' · no runs yet'].join('');
+}
+
 async function agents() {
   const { body: list } = await api('/agents');
+  const act = (fn) => async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try { await fn(); } catch (err) { handleErr(err); }
+    btn.disabled = false;
+  };
   render(
     h('header', { class: 'top' }, brand()), h('h1', {}, 'Agents'),
-    ...list.map((a) => h('div', { class: 'card' },
+    healthStrip(list),
+    ...list.map((a) => h('div', { class: `card${a.paused_at ? ' paused' : ''}` },
       h('div', { class: 'row' }, h('span', { class: 'title' }, a.name),
         h('span', { class: `pill ${a.enabled ? a.health_state ?? '' : ''}` }, a.enabled ? (a.health_state ?? 'idle') : 'off')),
-      h('div', { class: 'muted' }, [
-        a.schedule ? describeSchedule(a.schedule, a.timezone) : 'Manual only',
-        a.last_finished_at ? ` · last run ${ago(a.last_finished_at)}${a.last_outcome ? ` (${a.last_outcome})` : ''}` : ' · no runs yet',
-      ].join('')),
-      a.enabled ? h('div', { class: 'actions' }, h('button', { onclick: async (e) => {
-        e.currentTarget.disabled = true;
-        try {
+      h('div', { class: 'muted' }, agentStatusLine(a)),
+      a.enabled ? h('div', { class: 'actions' },
+        a.paused_at ? null : h('button', { onclick: act(async () => {
           const r = await api(`/agents/${enc(a.id)}/run`, { method: 'POST', body: { requestId: rid() } });
           toast(r.status === 202 ? `${a.name} started` : (r.body.error ?? 'Could not start'));
-        } catch (err) { handleErr(err); }
-        e.currentTarget.disabled = false;
-      } }, 'Run now')) : null)),
+        }) }, 'Run now'),
+        h('button', { class: a.paused_at ? 'primary' : '', onclick: act(async () => {
+          const r = await api(`/agents/${enc(a.id)}/${a.paused_at ? 'resume' : 'pause'}`, { method: 'POST' });
+          toast(r.body.message ?? r.body.error ?? 'Done'); route();
+        }) }, a.paused_at ? 'Resume' : 'Pause')) : null)),
     await notificationsCard(),
     h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
       h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await signOutHere(); route(); } }, 'Sign out')),
@@ -393,23 +427,34 @@ const deviceLabel = () => {
 const myDeviceId = () => { try { return localStorage.getItem('pushDeviceId'); } catch { return null; } };
 const setMyDeviceId = (id) => { try { id ? localStorage.setItem('pushDeviceId', id) : localStorage.removeItem('pushDeviceId'); } catch { /* storage blocked */ } };
 
+let notifyNote = ''; // why the last "Turn on" failed; stays on the card (a toast is too brief to read)
 async function notificationsCard() {
   const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && cfg.pushPublicKey;
   const reg = supported ? await navigator.serviceWorker.getRegistration('/app/') : null;
   const sub = reg ? await reg.pushManager.getSubscription() : null;
   const { body: devices } = await api('/push/devices');
   const on = Boolean(sub) && devices.some((d) => d.id === myDeviceId() && !d.disabled_at);
+  // Both browser steps can hang forever (a quiet permission prompt; a Chromium build with no push
+  // service, e.g. Norton or Brave), so each gets a time limit and a message that says what to do.
+  const within = (ms, p, msg) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error(msg)), ms))]);
   const turnOn = async (e) => {
-    e.currentTarget.disabled = true;
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Waiting for permission…';
     try {
-      if ((await Notification.requestPermission()) !== 'granted') { toast('Notifications are blocked for this site in browser settings.'); return route(); }
-      const r = await navigator.serviceWorker.ready;
-      const s = (await r.pushManager.getSubscription()) ?? await r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.pushPublicKey) });
+      const perm = await within(60_000, Notification.requestPermission(),
+        'no answer to the permission prompt. Look for a bell icon in the address bar and click Allow');
+      if (perm !== 'granted') { toast('Notifications are blocked for this site in browser settings.'); return route(); }
+      btn.textContent = 'Connecting…';
+      const r = await within(10_000, navigator.serviceWorker.ready, 'the app is not installed in this browser yet. Reload and try again');
+      const s = (await r.pushManager.getSubscription()) ?? await within(20_000,
+        r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.pushPublicKey) }),
+        "this browser didn't reach its push service. Use Google Chrome, Edge, Firefox or Safari");
       const x = await api('/push/devices', { method: 'POST', body: { subscription: s.toJSON(), label: deviceLabel() } });
       if (x.status !== 200) throw new Error(x.body.error ?? 'register failed');
       setMyDeviceId(x.body.id);
+      notifyNote = '';
       toast('Notifications on for this device');
-    } catch (err) { if (err instanceof AuthError) return handleErr(err); toast(`Could not turn on notifications: ${err.message}`); }
+    } catch (err) { if (err instanceof AuthError) return handleErr(err); notifyNote = `Couldn't turn on notifications: ${err.message}.`; }
     route();
   };
   const turnOff = async () => {
@@ -429,6 +474,7 @@ async function notificationsCard() {
       : h('div', { class: 'actions' }, on
         ? [h('button', { onclick: test }, 'Send test'), h('button', { onclick: turnOff }, 'Turn off here')]
         : h('button', { class: 'primary', onclick: turnOn }, 'Turn on for this device')),
+    notifyNote && !on ? h('p', { class: 'warn', style: 'font-size:14px' }, notifyNote) : null,
     devices.length ? h('ul', { class: 'items', style: 'margin-top:8px' }, devices.map((d) => h('li', {},
       h('div', { class: 'kv' }, h('span', {}, `${d.label}${d.id === myDeviceId() ? ' (this device)' : ''}`),
         h('button', { class: 'linkbtn', onclick: async () => { await api(`/push/devices/${d.id}`, { method: 'DELETE' }); if (d.id === myDeviceId()) setMyDeviceId(null); route(); } }, 'Remove')),

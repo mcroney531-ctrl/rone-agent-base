@@ -108,6 +108,26 @@ try {
   const r1 = await call('POST', '/agents/spike-agent/run', OWNER, { requestId: 'tap-abc' });
   const r2 = await call('POST', '/agents/spike-agent/run', OWNER, { requestId: 'tap-abc' });
   check('Run Now: one tap = one run, however often it is retried', r1.status === 202 && r1.body.workflowID === 'manual-spike-agent-tap-abc' && r2.body.workflowID === r1.body.workflowID, [r1, r2]);
+
+  // ---- pause / resume ----
+  const p1 = await call('POST', '/agents/spike-agent/pause', OWNER, {});
+  const firstPause = await one(db, `select paused_at, paused_by from ops.agents where id = 'spike-agent'`);
+  const p2 = await call('POST', '/agents/spike-agent/pause', OWNER, {});
+  const again2 = await one(db, `select paused_at, paused_by from ops.agents where id = 'spike-agent'`);
+  check('pause records who and when; pausing again keeps the original', p1.status === 200 && p2.status === 200
+    && firstPause.paused_by === 'owner:owner@example.com' && String(again2.paused_at) === String(firstPause.paused_at), { p1: p1.body, firstPause, again2 });
+  const pausedRow = ((await call('GET', '/agents', OWNER)).body as any[]).find((a) => a.id === 'spike-agent');
+  check('a paused agent shows as paused in the list', Boolean(pausedRow?.paused_at) && pausedRow.health_state === 'paused', pausedRow);
+  const blockedRun = await call('POST', '/agents/spike-agent/run', OWNER, { requestId: 'tap-paused' });
+  const blockedHook = await call('POST', '/webhooks/spike-agent', 'api-secret', { eventId: 'evt-paused' });
+  const startedWhilePaused = await one(db, `select count(*)::int n from ops.runs where workflow_id in ('manual-spike-agent-tap-paused', 'webhook-spike-agent-evt-paused')`);
+  check('paused: Run now and webhooks are refused (409) and start nothing', blockedRun.status === 409 && /paused/i.test(blockedRun.body.error)
+    && blockedHook.status === 409 && startedWhilePaused.n === 0, { blockedRun, blockedHook, startedWhilePaused });
+  check('pausing an unknown agent → 404', (await call('POST', '/agents/nope/pause', OWNER, {})).status === 404);
+  const resumed = await call('POST', '/agents/spike-agent/resume', OWNER, {});
+  const r3 = await call('POST', '/agents/spike-agent/run', OWNER, { requestId: 'tap-resumed' });
+  check('resume clears the pause and runs start again', resumed.status === 200 && r3.status === 202
+    && !(await one(db, `select paused_at from ops.agents where id = 'spike-agent'`)).paused_at, { resumed: resumed.body, r3 });
 } finally {
   await killAllWorkers();
   await db.end();
