@@ -155,9 +155,14 @@ let session = null;
 // Stale-tab guard. A tab left open across a deploy keeps running the code it loaded; one from before the
 // auth fix signed every device out (INC-2026-10-27, second occurrence). On resume, API calls wait while we
 // compare builds; if the server has moved on, reload instead of running old code.
+// Resume alone isn't enough: a desktop app window behind other windows never becomes "hidden", so it
+// never resumes. Hence also on focus, and before any request once the last check is over 5 minutes old.
 const BUILD = cfg.build;
+const BUILD_CHECK_MAX_AGE_MS = 5 * 60_000;
 let buildGate = Promise.resolve();
+let lastBuildCheck = Date.now(); // the page just loaded this build
 function checkBuild() {
+  lastBuildCheck = Date.now();
   buildGate = (async () => {
     try {
       const now = await (await fetch('/app/config', { cache: 'no-store' })).json();
@@ -167,7 +172,7 @@ function checkBuild() {
   return buildGate;
 }
 // Auth rule: a 401 never signs out directly; see /app/session.js.
-const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; }, beforeRequest: () => buildGate });
+const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; }, beforeRequest: () => (Date.now() - lastBuildCheck > BUILD_CHECK_MAX_AGE_MS ? checkBuild() : buildGate) });
 
 // ---------- screens ----------
 function loginScreen(note) {
@@ -523,6 +528,7 @@ document.addEventListener('visibilitychange', () => {
   if (session) route();
 });
 addEventListener('pageshow', (e) => { if (e.persisted) checkBuild(); }); // restored from the back/forward cache
+addEventListener('focus', () => { if (Date.now() - lastBuildCheck > 30_000) checkBuild(); }); // clicked back into the window
 // The magic link lands with tokens in the URL fragment; supabase-js consumes them, then start on Needs You.
 if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app/#/');
 route();
