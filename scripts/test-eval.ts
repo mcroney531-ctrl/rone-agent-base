@@ -28,6 +28,13 @@ check('sender-facing: a bracket asking or telling the owner something is caught'
   && ownerFacing('Happy to help. [when you can send them]').length === 1 && ownerFacing('Sure. Note to self: confirm with Dana first.').length === 1);
 check('sender-facing: fill-in slots and one choice slot are fine', ownerFacing('Thanks for the invite! [Yes, I\'ll be there / Sorry, I can\'t make it].').length === 0
   && ownerFacing('Works for me at [time].').length === 0 && ownerFacing('Thanks, you made my day.').length === 0);
+{
+  const { features } = await import('../src/inboxTriage.js');
+  const msg = (to: string, cc: string) => ({ id: 'x', threadId: 't', labelIds: ['INBOX'], receivedAt: '', from: 'a@b.c', fromName: null, fromAddr: 'a@b.c', replyTo: null,
+    to, cc, subject: 's', messageIdHeader: null, references: null, listUnsubscribe: false, precedence: null, autoSubmitted: null, snippet: '', body: '' });
+  check('addressed: direct recipient, cc only, or neither', features(msg('Me <me@x.com>', ''), 'me@x.com').addressed === 'to'
+    && features(msg('m@b.co', 'Me <ME@x.com>'), 'me@x.com').addressed === 'cc' && features(msg('list@x.com', ''), 'me@x.com').addressed === 'other');
+}
 check('unsupported facts: invented days, times and numbers are caught', JSON.stringify(unsupportedFacts('How about Tuesday at 3pm? My rate is $1,200.', 'Do you have time next week?'))
   === JSON.stringify(['tuesday', '3pm', '1,200']), unsupportedFacts('How about Tuesday at 3pm? My rate is $1,200.', 'Do you have time next week?'));
 check('unsupported facts: facts from the email and [placeholders] are fine', unsupportedFacts('Yes, Thursday works. Around [time]?', 'Free for lunch Thursday?').length === 0);

@@ -619,11 +619,13 @@
   {
    "id": "subtle-cc-visibility",
    "split": "dev",
-   "note": "subtle: the question is for Marcus, not the owner",
+   "note": "subtle: the owner is only cc'd and the question is for Marcus",
    "email": {
     "from": "Ellen Park <ellen.park@northwind.com>",
     "subject": "Re: vendor shortlist",
-    "body": "Looping in Rone for visibility. Marcus, can you send the two finalists to procurement by Thursday?"
+    "body": "Looping in Rone for visibility. Marcus, can you send the two finalists to procurement by Thursday?",
+    "to": "Marcus Bell <marcus@bellstudio.co>",
+    "cc": "Rone <owner@example.com>"
    },
    "expect": {
     "categories": [

@@ -76,7 +76,7 @@ export async function inboxAddedSince(connectionId: string, startHistoryId: stri
 
 export type MailMessage = {
   id: string; threadId: string; labelIds: string[]; receivedAt: string;
-  from: string; fromName: string | null; fromAddr: string; replyTo: string | null; to: string; subject: string;
+  from: string; fromName: string | null; fromAddr: string; replyTo: string | null; to: string; cc: string; subject: string;
   messageIdHeader: string | null; references: string | null;
   listUnsubscribe: boolean; precedence: string | null; autoSubmitted: string | null;
   snippet: string; body: string;
@@ -109,7 +109,7 @@ export async function getMessage(connectionId: string, id: string, maxBody = 400
   const f = parseFrom(from);
   return {
     id: m.id, threadId: m.threadId, labelIds: m.labelIds ?? [], receivedAt: new Date(Number(m.internalDate)).toISOString(),
-    from, fromName: f.name, fromAddr: f.addr, replyTo: h('Reply-To'), to: h('To') ?? '', subject: h('Subject') ?? '(no subject)',
+    from, fromName: f.name, fromAddr: f.addr, replyTo: h('Reply-To'), to: h('To') ?? '', cc: h('Cc') ?? '', subject: h('Subject') ?? '(no subject)',
     messageIdHeader: h('Message-ID') ?? h('Message-Id'), references: h('References'),
     listUnsubscribe: Boolean(h('List-Unsubscribe')), precedence: h('Precedence'), autoSubmitted: h('Auto-Submitted'),
     snippet: m.snippet ?? '', body: plainText(m.payload).slice(0, maxBody),

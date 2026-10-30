@@ -21,6 +21,7 @@ const Scenario = z.object({
   note: z.string().optional(),
   email: z.object({
     from: z.string(), replyTo: z.string().optional(), subject: z.string(), body: z.string(),
+    to: z.string().optional(), cc: z.string().optional(),   // default: To the owner, no Cc
     tab: z.enum(['primary', 'updates', 'promotions', 'social', 'forums']).default('primary'),
     bulk: z.boolean().default(false), autoSubmitted: z.boolean().default(false),
   }),
@@ -109,6 +110,8 @@ export function checkScenario(s: Scenario, f: Features, out: { category: Categor
     checks.push({ id: 'answers_not_meta', critical: false, pass: !META.test(out.draft) });
     checks.push({ id: 'no_signature', critical: false, pass: !SIGNOFF.test(out.draft) });
     checks.push({ id: 'short', critical: false, pass: sentences(out.draft).length <= 3 });
+    // "Yes, glad to. [Yes / No]": answered AND left the choice open.
+    checks.push({ id: 'coherent_choice', critical: false, pass: !(/\[\s*yes\s*\/\s*no\b/i.test(out.draft) && /\b(yes|sure|happy to|glad to)\b/i.test(strip(out.draft))) });
   }
   if (out.category === 'needs_reply') checks.push({ id: 'draft_present', critical: false, pass: Boolean(out.draft) });
   if (e.draft === 'required') checks.push({ id: 'draft_expected', critical: false, pass: Boolean(out.draft) });
@@ -118,6 +121,7 @@ export function checkScenario(s: Scenario, f: Features, out: { category: Categor
 
 // ---------- the suite ----------
 
+const OWNER = 'owner@example.com';
 const LABEL_FOR_TAB: Record<string, string | null> = { primary: null, updates: 'CATEGORY_UPDATES', promotions: 'CATEGORY_PROMOTIONS', social: 'CATEGORY_SOCIAL', forums: 'CATEGORY_FORUMS' };
 const BASE_TIME = Date.parse('2026-10-26T14:00:00Z');
 
@@ -127,7 +131,7 @@ function toMessage(s: Scenario, i: number): MailMessage {
   return {
     id: s.id, threadId: `t-${s.id}`, labelIds: ['INBOX', ...(tab ? [tab] : [])], receivedAt: new Date(BASE_TIME + i * 7 * 60_000).toISOString(),
     from: s.email.from, fromName: m ? m[1].trim() || null : null, fromAddr: (m ? m[2] : s.email.from).trim().toLowerCase(),
-    replyTo: s.email.replyTo ?? null, to: 'owner@example.com', subject: s.email.subject,
+    replyTo: s.email.replyTo ?? null, to: s.email.to ?? OWNER, cc: s.email.cc ?? '', subject: s.email.subject,
     messageIdHeader: `<${s.id}@eval.local>`, references: null,
     listUnsubscribe: s.email.bulk, precedence: null, autoSubmitted: s.email.autoSubmitted ? 'auto-generated' : null,
     snippet: s.email.body.slice(0, 100), body: s.email.body,
@@ -158,7 +162,7 @@ export function inboxTriageSuite(db: pg.Pool, opts: { corpusFile?: URL | string 
       const a = await agent();
       const { model } = plainModel(a.model);
       const picked = corpus.scenarios.filter((s) => splits.includes(s.split));
-      const items = picked.map((s, i) => ({ s, f: features(toMessage(s, i)) }));
+      const items = picked.map((s, i) => ({ s, f: features(toMessage(s, i), OWNER) }));
       const outs = new Map<string, { category: Category; summary: string; draft: string | null; ownerNote: string | null; returned: boolean }>();
       const forModel: Features[] = [];
       for (const { f } of items) {
@@ -168,7 +172,7 @@ export function inboxTriageSuite(db: pg.Pool, opts: { corpusFile?: URL | string 
       }
       // Same batch size as production: batch composition is part of what we measure.
       for (let i = 0; i < forModel.length; i += BATCH) {
-        for (const [ref, c] of await classify(model, a.instructions, 'owner@example.com', forModel.slice(i, i + BATCH))) outs.set(ref, c);
+        for (const [ref, c] of await classify(model, a.instructions, OWNER, forModel.slice(i, i + BATCH))) outs.set(ref, c);
       }
       return items.map(({ s, f }) => {
         const out = outs.get(f.ref)!;
