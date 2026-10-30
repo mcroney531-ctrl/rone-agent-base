@@ -100,6 +100,31 @@ What does *not* need a patch: changing what happens *inside* a step, or changing
 
 Approvals take minutes to days. A workflow waiting that long is exposed to every deploy and code change in between. So the reasoning workflow writes `ops.actions` rows and **ends**. Approval is a separate HTTP request that starts a new, short executor workflow. In this codebase both workflows live seconds.
 
+## Rule 6: losing ownership is control flow, not failure
+
+When a peer has taken a workflow over (after reaping a dead or silent executor), DBOS rejects the stale execution's next checkpoint with `DBOSWorkflowConflictError` ("no longer owned by this execution"). Cancellation surfaces as `DBOSWorkflowCancelledError`. **Neither is an application failure.** A `catch` around workflow code must rethrow them untouched, before recording anything:
+
+```ts
+} catch (err) {
+  const control = dbosControlError(err); // src/errors.ts: unwraps AI SDK wrappers
+  if (control) throw control;            // DBOS parks this execution and adopts the owner's outcome
+  // ...only now classify and record a real failure
+}
+```
+
+Recording it as a failed run would let a stale executor mark a run its replacement owns as failed, and the health layer would accuse a healthy takeover of failing (found by **t9**, H1). Every new `catch` in a workflow body follows this pattern.
+
+## Rule 7: the heartbeat lease must expire before a peer may take over
+
+Recovery has two thresholds:
+
+- **`DEAD_AFTER_MS`:** a peer reaps an executor whose heartbeat is older than this, and resumes its work.
+- **The lease, `LEASE_FRACTION × DEAD_AFTER_MS`:** an executor that has not renewed its heartbeat for this long exits (code 70).
+
+**The lease must stay comfortably below `DEAD_AFTER_MS`,** so a silent-but-alive executor is gone before anyone may take its work. Otherwise it keeps running after the reap and can even dequeue the workflow its replacement just resumed, so two executions of one workflow share a process (**t9**). Today it's 0.6 × 30 s = 18 s, and boot refuses a lease fraction outside (0, 0.8] or a lease shorter than two heartbeats.
+
+Change these as a ratio, never one number on its own. `LEASE_FRACTION=0` disables the lease and exists only for the failure suite (**t9c**). If the lease ever fails, DBOS's ownership check is the backstop: a stale checkpoint is rejected and Rule 6 keeps it from becoming a false failure.
+
 ## Workflow IDs are how duplicates die
 
 Starting a workflow with an ID that already exists returns the existing one; it doesn't start a second. Every entry point picks a deterministic ID:
@@ -134,3 +159,5 @@ Three consequences:
 - [ ] Step order/set changed? Guarded with `DBOS.patch('<name>')`
 - [ ] No workflow waits on a human
 - [ ] New entry point? Deterministic workflow ID
+- [ ] New `catch` in a workflow body? Rethrows DBOS control errors first (Rule 6)
+- [ ] Touched `HEARTBEAT_MS` / `DEAD_AFTER_MS` / `LEASE_FRACTION`? The lease still expires well before the reap (Rule 7)

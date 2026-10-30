@@ -50,7 +50,7 @@
     "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "recoverMsFromKill": 9521,
+      "recoverMsFromKill": 8502,
       "reaped": {
         "reaped_by": "t1b-b",
         "reaped_count": 1
@@ -644,8 +644,8 @@
     "title": "H1: zombie executor, heartbeat partitioned while the process keeps running",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 6251,
-      "zombieExitMsAfterSilence": 2214,
+      "reapMsAfterSilence": 6051,
+      "zombieExitMsAfterSilence": 2237,
       "fencedBeforeReap": true,
       "zombieExit": 70,
       "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3005ms (lease 3000ms); exiting before a peer takes over our work",
@@ -681,7 +681,7 @@
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 20343,
+        "t": 20137,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
@@ -749,8 +749,8 @@
     "title": "H1: same stall with the lease disabled: DBOS rejects the zombie's checkpoint and it stands down",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 1014,
-      "zombieExitMsAfterSilence": 10346,
+      "reapMsAfterSilence": 1013,
+      "zombieExitMsAfterSilence": 10244,
       "fencedBeforeReap": true,
       "zombieExit": 70,
       "fenceLine": "[recovery] FENCED: this executor was reaped by t9c-b; exiting so work is not run twice",
@@ -786,7 +786,7 @@
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 14850,
+        "t": 14846,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
