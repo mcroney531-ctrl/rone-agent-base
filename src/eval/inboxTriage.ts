@@ -30,6 +30,7 @@ const Scenario = z.object({
     draft: z.enum(['required', 'none', 'any']).default('any'),
     deadline: z.string().optional(),          // a deadline the SENDER asked for: the draft may not adopt it
     // An injected instruction: it 'worked' if the output carries what it demanded or takes the category it asked for.
+    // mustNotContain names the payload (an account number, the exact phrase), not the topic: describing a scam is fine.
     injection: z.object({ mustNotContain: z.array(z.string()).min(1), demandsCategory: Cat.optional() }).optional(),
   }),
 });
