@@ -9,7 +9,7 @@
         "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 8500,
+      "recoverMs": 7691,
       "finalState": {
         "run_state": "succeeded",
         "recovery_attempts": "1",
@@ -50,7 +50,7 @@
     "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "recoverMsFromKill": 9720,
+      "recoverMsFromKill": 8502,
       "reaped": {
         "reaped_by": "t1b-b",
         "reaped_count": 1
@@ -82,22 +82,22 @@
     "metrics": {
       "crashExit": 128,
       "providerAtCrash": {
-        "attempts": 2,
-        "n": 2,
-        "committed": 2,
+        "attempts": 1,
+        "n": 1,
+        "committed": 1,
         "deduped": 0,
         "faults": 0,
-        "uniqueEffects": 2
+        "uniqueEffects": 1
       },
       "providerFinal": {
-        "attempts": 4,
-        "n": 4,
+        "attempts": 3,
+        "n": 3,
         "committed": 2,
-        "deduped": 2,
+        "deduped": 1,
         "faults": 0,
         "uniqueEffects": 2
       },
-      "requestAttemptsVsUniqueEffects": "4 attempts → 2 committed effects (2 deduplicated by provider)",
+      "requestAttemptsVsUniqueEffects": "3 attempts → 2 committed effects (1 deduplicated by provider)",
       "approvals": {
         "approve1": 200,
         "approve2": 200,
@@ -150,38 +150,34 @@
         "t3-old"
       ],
       "pendingOnOldAtKill": [
-        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z",
+        "sched-agent-spike-agent-2026-10-30T03:40:08.000Z",
         "manual-spike-agent-deploy-inflight",
-        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z",
-        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z"
+        "sched-agent-spike-agent-2026-10-30T03:40:10.000Z"
       ],
-      "takeoverMs": 9513,
+      "takeoverMs": 11319,
       "inflightRun": {
         "run_state": "succeeded",
         "executor_id": "t3-new",
         "recovery_attempts": "1"
       },
       "inflightLedgerRows": 1,
-      "scheduledOccurrences": 9,
-      "distinctOccurrences": 9,
+      "scheduledOccurrences": 10,
+      "distinctOccurrences": 10,
       "byExecutor": {
         "t3-old": 1,
-        "t3-new": 8
+        "t3-new": 9
       },
       "nonTerminalAtEnd": [],
       "duplicateActionGroups": 0,
       "modelTurnsRunMoreThanOnce": {
-        "sched-agent-spike-agent-2026-10-25T23:35:20.000Z": [
+        "sched-agent-spike-agent-2026-10-30T03:40:08.000Z": [
           4
         ],
         "manual-spike-agent-deploy-inflight": [
-          4
+          3
         ],
-        "sched-agent-spike-agent-2026-10-25T23:35:22.000Z": [
+        "sched-agent-spike-agent-2026-10-30T03:40:10.000Z": [
           2
-        ],
-        "sched-agent-spike-agent-2026-10-25T23:35:24.000Z": [
-          0
         ]
       }
     },
@@ -197,7 +193,7 @@
     "classification": "PASS",
     "metrics": {
       "exitCode": 0,
-      "drainMs": 3817,
+      "drainMs": 3827,
       "finalState": {
         "run_state": "succeeded",
         "executor_id": "t3b-old",
@@ -224,7 +220,7 @@
     "title": "Deploy a step-inserting code change while work is mid-flight (patching mode + DBOS.patch)",
     "classification": "PASS",
     "metrics": {
-      "settleMs": 5043,
+      "settleMs": 5845,
       "final": [
         {
           "logical_action": "calendar.hold",
@@ -333,7 +329,7 @@
         },
         {
           "kind": "action_stuck",
-          "ref": "a833254d-9d70-4584-b983-4d6e3e9ae168",
+          "ref": "eb844cd5-c95f-4993-92c3-b5b229b4ed42",
           "detail": "approved but executor failed"
         }
       ],
@@ -380,7 +376,7 @@
         "status": "executed",
         "error": null
       },
-      "drainedByOldBuildMs": 1010
+      "drainedByOldBuildMs": 1008
     },
     "notes": [
       "Hard rule 4 as written (version = build) strands an old build's in-flight work once the old container is gone: v2 executors will not dequeue v1 rows, even after resume.",
@@ -394,12 +390,12 @@
     "classification": "PASS WITH ADAPTER",
     "metrics": {
       "oldExitCode": 0,
-      "drainMs": 2029,
+      "drainMs": 2023,
       "workflowAtOldExit": {
         "status": "PENDING",
         "executor_id": "t4d-old"
       },
-      "takeoverMs": 10898,
+      "takeoverMs": 11103,
       "oldExecutor": {
         "drained_flag": true,
         "reaped_by": "t4d-new"
@@ -489,7 +485,7 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "5c6a1485-c5f2-4df7-a958-f91d09e9fd0e",
+          "ref": "08be4958-2df8-40a8-b2fa-a5fcd0ecd00f",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {
@@ -557,13 +553,27 @@
           "health_state": "blocked",
           "last_outcome": "failed",
           "last_error_class": "connection_unavailable",
-          "last_finished_at": "2026-10-25T23:38:57.115Z",
+          "last_finished_at": "2026-10-30T03:42:44.444Z",
           "runs_24h": "4",
           "failures_24h": "3",
           "running_now": "0",
           "pending_approvals": "1",
           "blocked_connections": [
             "fake_provider:spike"
+          ]
+        },
+        {
+          "agent_id": "calendar-prep",
+          "health_state": "blocked",
+          "last_outcome": null,
+          "last_error_class": null,
+          "last_finished_at": null,
+          "runs_24h": "0",
+          "failures_24h": "0",
+          "running_now": "0",
+          "pending_approvals": "0",
+          "blocked_connections": [
+            "google:primary"
           ]
         }
       ]
@@ -589,13 +599,13 @@
       },
       "sessionPooler": {
         "crashRecovery": "succeeded",
-        "approvalToExecutedMs": 1030,
+        "approvalToExecutedMs": 1025,
         "dbosSelfTestWarning": false
       },
       "transactionPoolerWithGuardBypassed": {
         "booted": true,
         "dbosSelfTestWarning": true,
-        "runCompletedMs": 2238
+        "runCompletedMs": 2230
       }
     },
     "notes": [
@@ -616,10 +626,10 @@
         "== upgrade -> DBOS 5.2.11 (probe-pending-5.1.10 before: PENDING)",
         "Running DBOS system database migrations...",
         "[probe] recovered result: done-pending",
-        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=1 attention rows=0 | ops->dbos deps=0",
+        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=2 attention rows=0 | ops->dbos deps=0",
         "== upgrade -> DBOS 5.3.0 (probe-pending-5.2.11 before: PENDING)",
         "[probe] recovered result: done-pending",
-        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=1 attention rows=0 | ops->dbos deps=0",
+        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=2 attention rows=0 | ops->dbos deps=0",
         "UPGRADE TEST: PASS"
       ]
     },
@@ -627,6 +637,163 @@
       "Each hop: a workflow is SIGKILLed mid-flight under the old DBOS, then the new DBOS launches (running its migrations) and finishes it.",
       "npm only carries the latest patch of each 5.x minor (5.0.2, 5.1.10, 5.2.11, 5.3.0), so this is two consecutive minor hops rather than a same-minor patch hop.",
       "5.1.10 → 5.2.11 includes a real schema migration (122 → 123) applied with ops views in place; 5.2.11 → 5.3.0 has none."
+    ]
+  },
+  "t9": {
+    "id": "t9",
+    "title": "H1: zombie executor, heartbeat partitioned while the process keeps running",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "reapMsAfterSilence": 6051,
+      "zombieExitMsAfterSilence": 2237,
+      "fencedBeforeReap": true,
+      "zombieExit": 70,
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3005ms (lease 3000ms); exiting before a peer takes over our work",
+      "conflictLines": 0,
+      "finalState": {
+        "run_state": "succeeded",
+        "executor_id": "t9-b",
+        "recovery_attempts": "1"
+      },
+      "runLedger": {
+        "n": 1,
+        "outcome": "succeeded",
+        "err": null
+      },
+      "actions": 3,
+      "distinctKeys": 3,
+      "modelTurnsByProcess": {
+        "zombie": [
+          0,
+          1
+        ],
+        "peer": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "healthSamples": 48,
+      "healthTimeline": [
+        "idle",
+        "healthy"
+      ],
+      "misleadingSamples": [],
+      "final": {
+        "t": 20137,
+        "health": "healthy",
+        "lastOutcome": "succeeded",
+        "items": []
+      }
+    },
+    "notes": [
+      "Partition = a test trigger that rejects only the zombie heartbeat write; its process, workflow and queue polling keep running.",
+      "Before the lease, the zombie kept running past its reap and dequeued the workflow its replacement had just resumed: two executions of one workflow in one process; the AI SDK durable-call guard failed the legitimate one, and our catch block recorded the run as failed. Now the zombie exits once it has been silent for 60% of DEAD_AFTER_MS, before any peer may reap it."
+    ]
+  },
+  "t9b": {
+    "id": "t9b",
+    "title": "H1: zombie executor, process frozen past the reap, then wakes mid-way through the peer's run",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "reapMsAfterSilence": 6054,
+      "zombieExitMsAfterSilence": 6279,
+      "fencedBeforeReap": true,
+      "zombieExit": 70,
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 7052ms (lease 3000ms); exiting before a peer takes over our work",
+      "conflictLines": 0,
+      "finalState": {
+        "run_state": "succeeded",
+        "executor_id": "t9b-b",
+        "recovery_attempts": "1"
+      },
+      "runLedger": {
+        "n": 1,
+        "outcome": "succeeded",
+        "err": null
+      },
+      "actions": 3,
+      "distinctKeys": 3,
+      "modelTurnsByProcess": {
+        "zombie": [
+          0,
+          1
+        ],
+        "peer": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "healthSamples": 46,
+      "healthTimeline": [
+        "idle",
+        "healthy"
+      ],
+      "misleadingSamples": [],
+      "final": {
+        "t": 19359,
+        "health": "healthy",
+        "lastOutcome": "succeeded",
+        "items": []
+      }
+    },
+    "notes": [
+      "The frozen process cannot dequeue, so the peer owns the resumed workflow. On waking, the zombie checks its lease before anything else and exits (code 70); any checkpoint it attempts first is rejected by DBOS (workflow no longer owned), and our catch blocks now rethrow that untouched instead of recording a failed run."
+    ]
+  },
+  "t9c": {
+    "id": "t9c",
+    "title": "H1: same stall with the lease disabled: DBOS rejects the zombie's checkpoint and it stands down",
+    "classification": "PASS WITH ADAPTER",
+    "metrics": {
+      "reapMsAfterSilence": 1013,
+      "zombieExitMsAfterSilence": 10244,
+      "fencedBeforeReap": true,
+      "zombieExit": 70,
+      "fenceLine": "[recovery] FENCED: this executor was reaped by t9c-b; exiting so work is not run twice",
+      "conflictLines": 1,
+      "finalState": {
+        "run_state": "succeeded",
+        "executor_id": "t9c-b",
+        "recovery_attempts": "1"
+      },
+      "runLedger": {
+        "n": 1,
+        "outcome": "succeeded",
+        "err": null
+      },
+      "actions": 3,
+      "distinctKeys": 3,
+      "modelTurnsByProcess": {
+        "zombie": [
+          0,
+          1
+        ],
+        "peer": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "healthSamples": 35,
+      "healthTimeline": [
+        "idle",
+        "healthy"
+      ],
+      "misleadingSamples": [],
+      "final": {
+        "t": 14846,
+        "health": "healthy",
+        "lastOutcome": "succeeded",
+        "items": []
+      }
+    },
+    "notes": [
+      "Defence in depth: with no lease, the woken zombie finishes its in-flight model call and tries to checkpoint it. DBOS rejects it (DBOSWorkflowConflictError: no longer owned), our catch rethrows it untouched (no failed run recorded), DBOS parks that execution to adopt the owner's outcome, and the zombie's next heartbeat sees it was reaped and exits 70."
     ]
   }
 }

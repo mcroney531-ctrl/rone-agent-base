@@ -77,4 +77,13 @@ export const FAKE_PROVIDER_URL = process.env.FAKE_PROVIDER_URL ?? 'http://127.0.
 
 export const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS ?? 5000);
 export const DEAD_AFTER_MS = Number(process.env.DEAD_AFTER_MS ?? 30000);
+// Self-fence after this fraction of DEAD_AFTER_MS without a renewed heartbeat. 0 disables (failure suite only,
+// to exercise DBOS's checkpoint-ownership fence on its own).
+export const LEASE_FRACTION = Number(process.env.LEASE_FRACTION ?? 0.6);
+// docs/durable-workflows.md Rule 7: the lease must expire comfortably before a peer may reap us, and must
+// survive at least two missed heartbeats. Refuse to boot otherwise rather than run with unsafe recovery.
+if (LEASE_FRACTION !== 0 && !(LEASE_FRACTION > 0 && LEASE_FRACTION <= 0.8 && DEAD_AFTER_MS * LEASE_FRACTION >= 2 * HEARTBEAT_MS)) {
+  throw new Error(`unsafe recovery timing: LEASE_FRACTION=${LEASE_FRACTION} with DEAD_AFTER_MS=${DEAD_AFTER_MS}, HEARTBEAT_MS=${HEARTBEAT_MS}; `
+    + 'need 0 < fraction <= 0.8 and lease >= 2 heartbeats (see docs/durable-workflows.md, Rule 7)');
+}
 export const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? 20000);

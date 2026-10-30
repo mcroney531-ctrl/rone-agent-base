@@ -10,7 +10,7 @@ import { durableMCPTools, durableTools } from '@dbos-inc/vercel-ai';
 import { z } from 'zod';
 import { pool } from './db.js';
 import { agentModel } from './model.js';
-import { classify, OpsError } from './errors.js';
+import { classify, dbosControlError, OpsError } from './errors.js';
 import { FAKE_PROVIDER_URL } from './config.js';
 import { calendarPrepRun, createAgentOpsHold } from './calendarPrep.js';
 
@@ -151,6 +151,8 @@ async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: 
       await mcpClient?.close();
     }
   } catch (err) {
+    const control = dbosControlError(err);
+    if (control) throw control;
     const { errorClass, message } = classify(err);
     await DBOS.runStep(() => recordRunEnd(workflowId, 'failed', { errorClass, errorMessage: message }), { name: 'recordRunFailed' });
     throw err;
@@ -297,6 +299,8 @@ async function executeActionBody(actionId: string) {
     await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', {}), { name: 'recordRunEnd' });
     return result;
   } catch (err) {
+    const control = dbosControlError(err);
+    if (control) throw control;
     const { errorClass, message } = classify(err);
     await DBOS.runStep(async () => {
       await pool.query(`update ops.actions set status = 'failed', error = $2, updated_at = now() where id = $1 and status = 'approved'`, [actionId, `${errorClass}: ${message}`]);
