@@ -16,6 +16,11 @@ export function agentModel(modelId: string): LanguageModel {
   });
 }
 
+// The same model without durability, for code that runs outside a workflow (the eval harness, src/eval/).
+export function plainModel(modelId: string): { model: LanguageModel; provider: 'anthropic' | 'mock' } {
+  return process.env.ANTHROPIC_API_KEY ? { model: anthropic(modelId), provider: 'anthropic' } : { model: scriptedMock(), provider: 'mock' };
+}
+
 // Deterministic stand-in for the model when no API key is present. It calls the real tools
 // (MCP + ours) in the order the spike agent's instructions ask for. Each invocation is appended
 // to MOCK_CALL_LOG so the failure suite can count how many model calls were actually paid for.
