@@ -390,7 +390,8 @@ function agentStatusLine(a) {
 }
 
 async function agents() {
-  const { body: list } = await api('/agents');
+  // Switched-off agents (enabled = false) are configuration, not something the owner can act on here.
+  const list = (await api('/agents')).body.filter((a) => a.enabled);
   const act = (fn) => async (e) => {
     const btn = e.currentTarget; btn.disabled = true;
     try { await fn(); } catch (err) { handleErr(err); }
