@@ -50,6 +50,7 @@ function scriptedMock() {
       const stop = (text: string) => ({
         content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
       });
+      if (options.responseFormat?.type === 'json' && promptText.includes('<emails>')) return stop(JSON.stringify(mockTriage(promptText)));
       if (options.responseFormat?.type === 'json') return stop(JSON.stringify(mockRanking(promptText)));
       if (promptText.includes('<deeper>')) {
         // Echo the context lines so tests can see what deeper prep was given.
@@ -116,4 +117,25 @@ function mockRanking(prompt: string) {
       hold: e.docLinks.length ? { idealMinutes: 45, minimumMinutes: 20, preferredLeadMinutes: 30 } : null,
     }));
   return { headline: `${items.length} worth preparing for`, items };
+}
+
+// Inbox Triage stand-in: keyword rules a sensible triager would follow. It deliberately returns needs_reply for a
+// no-reply sender asking a question, so the workflow's "needs_reply requires canReply" rule is exercised.
+function mockTriage(prompt: string) {
+  const m = /<emails>([\s\S]*)<\/emails>/.exec(prompt);
+  const emails = (m ? JSON.parse(m[1]) : []) as { ref: string; from: string; subject: string; text: string; canReply: boolean; bulk: boolean }[];
+  return {
+    items: emails.map((e) => {
+      const s = `${e.subject} ${e.text}`.toLowerCase();
+      const category = /invoice|receipt|order confirm|shipped/.test(s) ? 'receipt'
+        : /password|verify|expir|payment failed|action required/.test(s) ? 'action_required'
+        : e.bulk ? 'newsletter'
+        : /\?/.test(s) ? 'needs_reply' : 'fyi';
+      return {
+        ref: e.ref, category,
+        summary: `${e.from.split('<')[0].trim() || 'Someone'}: ${e.subject}`.slice(0, 120),
+        draft: category === 'needs_reply' ? `Thanks for reaching out. I'll take a look and get back to you by [day].` : null,
+      };
+    }),
+  };
 }

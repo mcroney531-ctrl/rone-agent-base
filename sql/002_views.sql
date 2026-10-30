@@ -80,7 +80,7 @@ last_finished as (
 blocked as (
   select ac.agent_id, array_agg(c.id order by c.id) as connections
     from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id
-   where ac.required and c.status <> 'active'
+   where ac.required and (c.status <> 'active' or not (ac.scopes <@ c.scopes))
    group by ac.agent_id
 )
 select
@@ -146,6 +146,15 @@ select 'connection_problem', c.id, min(ac.agent_id), coalesce(c.last_checked_at,
   from ops.connections c left join ops.agent_connections ac on ac.connection_id = c.id
  where c.status not in ('active', 'pending')
  group by c.id, c.last_checked_at, c.updated_at, c.status, c.account_label, c.last_error
+union all
+-- An active connection that lacks a scope some agent needs (e.g. Gmail for Inbox Triage): only those
+-- agents are blocked; the fix is the same Reconnect, which asks for every scope.
+select 'connection_problem', c.id, min(ac.agent_id), c.updated_at,
+       'More access needed (' || coalesce(c.account_label, c.id) || '): reconnect to let '
+         || string_agg(distinct initcap(replace(ac.agent_id, '-', ' ')), ', ') || ' use it'
+  from ops.connections c join ops.agent_connections ac on ac.connection_id = c.id
+ where c.status = 'active' and ac.required and not (ac.scopes <@ c.scopes)
+ group by c.id, c.updated_at, c.account_label
 union all
 -- Briefs: tomorrow's (or today's) brief until it's been opened, and any brief whose calendar mirror failed.
 select 'brief_ready', b.id::text, b.agent_id, b.updated_at,

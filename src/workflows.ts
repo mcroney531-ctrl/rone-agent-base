@@ -13,6 +13,8 @@ import { agentModel } from './model.js';
 import { classify, dbosControlError, OpsError } from './errors.js';
 import { FAKE_PROVIDER_URL } from './config.js';
 import { calendarPrepRun, createAgentOpsHold } from './calendarPrep.js';
+import { inboxTriageRun } from './inboxTriage.js';
+import { addAgentOpsLabel, createDraftReplyOnce } from './connections/gmail.js';
 
 export const EXECUTOR_QUEUE = 'executor';
 export const AGENT_QUEUE = 'agent_runs';
@@ -54,7 +56,7 @@ const RISK_RANK = { low: 0, medium: 1, high: 2 } as const;
 async function loadAgent(agentId: string): Promise<AgentRow> {
   const { rows } = await pool.query(
     `select a.id, a.model, a.timezone, a.instructions, a.mcp_server_url, a.approval_policy, a.handler, a.settings,
-            coalesce(array_agg(c.id) filter (where ac.required and c.status <> 'active'), '{}') as blocked_connections
+            coalesce(array_agg(c.id) filter (where ac.required and (c.status <> 'active' or not (ac.scopes <@ c.scopes))), '{}') as blocked_connections
        from ops.agents a
        left join ops.agent_connections ac on ac.agent_id = a.id
        left join ops.connections c on c.id = ac.connection_id
@@ -92,11 +94,16 @@ async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: 
     const agent = await DBOS.runStep(() => loadAgent(agentId), { name: 'loadAgent' });
     // Branching on a step's checkpointed output is deterministic: on replay, `agent` is the same value.
     if (agent.blocked_connections.length) {
-      throw new OpsError('connection_unavailable', `required connection(s) not active: ${agent.blocked_connections.join(', ')}`);
+      throw new OpsError('connection_unavailable', `required connection(s) not active or missing access: ${agent.blocked_connections.join(', ')}`);
     }
     // Custom handlers branch on the checkpointed agent row, so a replay takes the same path.
     if (agent.handler === 'calendar_prep') {
       const out = await calendarPrepRun(agent, trigger, workflowId);
+      await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: out.proposed }), { name: 'recordRunEnd' });
+      return out;
+    }
+    if (agent.handler === 'inbox_triage') {
+      const out = await inboxTriageRun(agent, trigger, workflowId);
       await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: out.proposed }), { name: 'recordRunEnd' });
       return out;
     }
@@ -194,13 +201,22 @@ export async function insertAction(
 
 export const agentRun = DBOS.registerWorkflow(agentRunBody, { name: 'agentRun' });
 
+// Skips a scheduled occurrence when the agent is paused, or blocked on a connection (not active, or missing a
+// scope it needs). A blocked agent already shows in Needs You as one "Reconnect" item; failing every tick
+// (every 20 minutes for Inbox Triage) would only bury it under identical "Run failed" items. Manual runs
+// still fail loudly. The step keeps its original name: only its body changed, so no patch is needed.
 async function skipIfPaused(agentId: string, scheduledAt: Date): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `update ops.agents set last_skipped_at = greatest(coalesce(last_skipped_at, $2), $2) where id = $1 and paused_at is not null`,
+  const { rows } = await pool.query(
+    `update ops.agents a set last_skipped_at = greatest(coalesce(a.last_skipped_at, $2), $2),
+            last_skip_reason = case when a.paused_at is not null then 'paused' else 'blocked' end
+      where a.id = $1 and (a.paused_at is not null or exists (
+        select 1 from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id
+         where ac.agent_id = a.id and ac.required and (c.status <> 'active' or not (ac.scopes <@ c.scopes))))
+      returning last_skip_reason`,
     [agentId, scheduledAt],
   );
-  if (rowCount) console.log(`[schedule] ${agentId} is paused; skipped ${scheduledAt.toISOString()}`);
-  return rowCount === 1;
+  if (rows[0]) console.log(`[schedule] ${agentId} is ${rows[0].last_skip_reason}; skipped ${scheduledAt.toISOString()}`);
+  return rows.length === 1;
 }
 
 // Scheduled entry point. DBOS derives the workflow ID from schedule name + scheduled time
@@ -310,9 +326,38 @@ async function executeActionBody(actionId: string) {
   }
 }
 
+// Failure-suite hook: die after the provider committed, before DBOS checkpoints this step.
+// CRASH_AFTER_PROVIDER_CALL_ACTION narrows it to one logical action (e.g. gmail.draft).
+async function crashHook(action: { idempotency_key: string; logical_action: string }) {
+  const marker = process.env.CRASH_AFTER_PROVIDER_CALL;
+  const only = process.env.CRASH_AFTER_PROVIDER_CALL_ACTION;
+  if (marker && !fs.existsSync(marker) && (!only || only === action.logical_action)) {
+    fs.writeFileSync(marker, `${action.idempotency_key}\n`);
+    console.log(`[crash-hook] SIGKILL after provider accepted ${action.idempotency_key}`);
+    process.kill(process.pid, 'SIGKILL');
+    await new Promise(() => undefined);
+  }
+}
+
 async function callProvider(action: { agent_id: string; idempotency_key: string; logical_action: string; target: string; payload: Record<string, unknown> }) {
   // Real providers dispatch by logical action inside the same step, so the step sequence is unchanged.
   if (action.logical_action === 'agentops.hold') return createAgentOpsHold(action);
+  // Gmail: only these two capabilities exist (src/connections/gmail.ts). Anything else gmail.* is refused.
+  const p = action.payload as Record<string, string | null>;
+  if (action.logical_action === 'gmail.label') {
+    const r = await addAgentOpsLabel(p.connectionId!, p.messageId!, p.label!);
+    await crashHook(action);
+    return r;
+  }
+  if (action.logical_action === 'gmail.draft') {
+    const r = await createDraftReplyOnce(p.connectionId!, {
+      threadId: p.threadId!, to: p.to!, subject: p.subject!, body: p.draft!, inReplyTo: p.inReplyTo, references: p.references,
+      idempotencyKey: action.idempotency_key,
+    });
+    await crashHook(action);
+    return r;
+  }
+  if (action.logical_action.startsWith('gmail.')) throw new OpsError('validation', `no Gmail capability for ${action.logical_action}`);
   const res = await fetch(`${FAKE_PROVIDER_URL}/effects`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'idempotency-key': action.idempotency_key },
@@ -320,15 +365,7 @@ async function callProvider(action: { agent_id: string; idempotency_key: string;
   });
   const body = await res.json();
   if (!res.ok) throw new OpsError(res.status === 401 || res.status === 403 ? 'provider_auth' : 'provider_unavailable', `provider ${res.status}: ${body.error}`);
-
-  // Failure-suite hook: die after the provider committed, before DBOS checkpoints this step.
-  const marker = process.env.CRASH_AFTER_PROVIDER_CALL;
-  if (marker && !fs.existsSync(marker)) {
-    fs.writeFileSync(marker, `${action.idempotency_key}\n`);
-    console.log(`[crash-hook] SIGKILL after provider accepted ${action.idempotency_key}`);
-    process.kill(process.pid, 'SIGKILL');
-    await new Promise(() => undefined);
-  }
+  await crashHook(action);
   return body;
 }
 

@@ -9,7 +9,7 @@
         "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 7691,
+      "recoverMs": 7687,
       "finalState": {
         "run_state": "succeeded",
         "recovery_attempts": "1",
@@ -50,7 +50,7 @@
     "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "recoverMsFromKill": 8502,
+      "recoverMsFromKill": 8550,
       "reaped": {
         "reaped_by": "t1b-b",
         "reaped_count": 1
@@ -150,34 +150,35 @@
         "t3-old"
       ],
       "pendingOnOldAtKill": [
-        "sched-agent-spike-agent-2026-10-30T03:40:08.000Z",
+        "sched-agent-spike-agent-2026-10-30T12:46:52.000Z",
         "manual-spike-agent-deploy-inflight",
-        "sched-agent-spike-agent-2026-10-30T03:40:10.000Z"
+        "sched-agent-spike-agent-2026-10-30T12:46:54.000Z",
+        "sched-agent-spike-agent-2026-10-30T12:46:56.000Z"
       ],
-      "takeoverMs": 11319,
+      "takeoverMs": 9942,
       "inflightRun": {
         "run_state": "succeeded",
         "executor_id": "t3-new",
         "recovery_attempts": "1"
       },
       "inflightLedgerRows": 1,
-      "scheduledOccurrences": 10,
-      "distinctOccurrences": 10,
+      "scheduledOccurrences": 9,
+      "distinctOccurrences": 9,
       "byExecutor": {
         "t3-old": 1,
-        "t3-new": 9
+        "t3-new": 8
       },
       "nonTerminalAtEnd": [],
       "duplicateActionGroups": 0,
       "modelTurnsRunMoreThanOnce": {
-        "sched-agent-spike-agent-2026-10-30T03:40:08.000Z": [
+        "sched-agent-spike-agent-2026-10-30T12:46:52.000Z": [
           4
         ],
-        "manual-spike-agent-deploy-inflight": [
-          3
-        ],
-        "sched-agent-spike-agent-2026-10-30T03:40:10.000Z": [
+        "sched-agent-spike-agent-2026-10-30T12:46:54.000Z": [
           2
+        ],
+        "sched-agent-spike-agent-2026-10-30T12:46:56.000Z": [
+          0
         ]
       }
     },
@@ -193,7 +194,7 @@
     "classification": "PASS",
     "metrics": {
       "exitCode": 0,
-      "drainMs": 3827,
+      "drainMs": 3841,
       "finalState": {
         "run_state": "succeeded",
         "executor_id": "t3b-old",
@@ -220,7 +221,7 @@
     "title": "Deploy a step-inserting code change while work is mid-flight (patching mode + DBOS.patch)",
     "classification": "PASS",
     "metrics": {
-      "settleMs": 5845,
+      "settleMs": 5037,
       "final": [
         {
           "logical_action": "calendar.hold",
@@ -329,7 +330,7 @@
         },
         {
           "kind": "action_stuck",
-          "ref": "eb844cd5-c95f-4993-92c3-b5b229b4ed42",
+          "ref": "cdf47e43-6575-4f22-a3fc-482c1700902e",
           "detail": "approved but executor failed"
         }
       ],
@@ -376,7 +377,7 @@
         "status": "executed",
         "error": null
       },
-      "drainedByOldBuildMs": 1008
+      "drainedByOldBuildMs": 1009
     },
     "notes": [
       "Hard rule 4 as written (version = build) strands an old build's in-flight work once the old container is gone: v2 executors will not dequeue v1 rows, even after resume.",
@@ -390,12 +391,12 @@
     "classification": "PASS WITH ADAPTER",
     "metrics": {
       "oldExitCode": 0,
-      "drainMs": 2023,
+      "drainMs": 2026,
       "workflowAtOldExit": {
         "status": "PENDING",
         "executor_id": "t4d-old"
       },
-      "takeoverMs": 11103,
+      "takeoverMs": 11099,
       "oldExecutor": {
         "drained_flag": true,
         "reaped_by": "t4d-new"
@@ -485,7 +486,7 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "08be4958-2df8-40a8-b2fa-a5fcd0ecd00f",
+          "ref": "45beb4b2-67bc-4601-b68f-bb4ada824643",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {
@@ -511,7 +512,7 @@
         {
           "kind": "run_failed",
           "ref": "manual-spike-agent-conn",
-          "detail": "connection_unavailable: required connection(s) not active: fake_provider:spike"
+          "detail": "connection_unavailable: required connection(s) not active or missing access: fake_provider:spike"
         }
       ]
     },
@@ -527,15 +528,15 @@
       "pgDependOpsOnDbos": [],
       "viewsMentioningDbos": [
         {
-          "viewname": "v_runs",
-          "mentions_dbos": false
-        },
-        {
           "viewname": "agent_health",
           "mentions_dbos": false
         },
         {
           "viewname": "attention_queue",
+          "mentions_dbos": false
+        },
+        {
+          "viewname": "v_runs",
           "mentions_dbos": false
         }
       ],
@@ -553,7 +554,7 @@
           "health_state": "blocked",
           "last_outcome": "failed",
           "last_error_class": "connection_unavailable",
-          "last_finished_at": "2026-10-30T03:42:44.444Z",
+          "last_finished_at": "2026-10-30T12:49:25.911Z",
           "runs_24h": "4",
           "failures_24h": "3",
           "running_now": "0",
@@ -564,6 +565,20 @@
         },
         {
           "agent_id": "calendar-prep",
+          "health_state": "blocked",
+          "last_outcome": null,
+          "last_error_class": null,
+          "last_finished_at": null,
+          "runs_24h": "0",
+          "failures_24h": "0",
+          "running_now": "0",
+          "pending_approvals": "0",
+          "blocked_connections": [
+            "google:primary"
+          ]
+        },
+        {
+          "agent_id": "inbox-triage",
           "health_state": "blocked",
           "last_outcome": null,
           "last_error_class": null,
@@ -599,13 +614,13 @@
       },
       "sessionPooler": {
         "crashRecovery": "succeeded",
-        "approvalToExecutedMs": 1025,
+        "approvalToExecutedMs": 1026,
         "dbosSelfTestWarning": false
       },
       "transactionPoolerWithGuardBypassed": {
         "booted": true,
         "dbosSelfTestWarning": true,
-        "runCompletedMs": 2230
+        "runCompletedMs": 2235
       }
     },
     "notes": [
@@ -626,10 +641,10 @@
         "== upgrade -> DBOS 5.2.11 (probe-pending-5.1.10 before: PENDING)",
         "Running DBOS system database migrations...",
         "[probe] recovered result: done-pending",
-        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=2 attention rows=0 | ops->dbos deps=0",
+        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=3 attention rows=0 | ops->dbos deps=0",
         "== upgrade -> DBOS 5.3.0 (probe-pending-5.2.11 before: PENDING)",
         "[probe] recovered result: done-pending",
-        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=2 attention rows=0 | ops->dbos deps=0",
+        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=3 attention rows=0 | ops->dbos deps=0",
         "UPGRADE TEST: PASS"
       ]
     },
@@ -644,11 +659,11 @@
     "title": "H1: zombie executor, heartbeat partitioned while the process keeps running",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 6051,
-      "zombieExitMsAfterSilence": 2237,
+      "reapMsAfterSilence": 6053,
+      "zombieExitMsAfterSilence": 2348,
       "fencedBeforeReap": true,
       "zombieExit": 70,
-      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3005ms (lease 3000ms); exiting before a peer takes over our work",
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3001ms (lease 3000ms); exiting before a peer takes over our work",
       "conflictLines": 0,
       "finalState": {
         "run_state": "succeeded",
@@ -674,14 +689,14 @@
           4
         ]
       },
-      "healthSamples": 48,
+      "healthSamples": 47,
       "healthTimeline": [
         "idle",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 20137,
+        "t": 19738,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
@@ -697,11 +712,11 @@
     "title": "H1: zombie executor, process frozen past the reap, then wakes mid-way through the peer's run",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 6054,
-      "zombieExitMsAfterSilence": 6279,
+      "reapMsAfterSilence": 6063,
+      "zombieExitMsAfterSilence": 6097,
       "fencedBeforeReap": true,
       "zombieExit": 70,
-      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 7052ms (lease 3000ms); exiting before a peer takes over our work",
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 6710ms (lease 3000ms); exiting before a peer takes over our work",
       "conflictLines": 0,
       "finalState": {
         "run_state": "succeeded",
@@ -727,14 +742,15 @@
           4
         ]
       },
-      "healthSamples": 46,
+      "healthSamples": 45,
       "healthTimeline": [
         "idle",
+        "degraded",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 19359,
+        "t": 18927,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
@@ -749,8 +765,8 @@
     "title": "H1: same stall with the lease disabled: DBOS rejects the zombie's checkpoint and it stands down",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 1013,
-      "zombieExitMsAfterSilence": 10244,
+      "reapMsAfterSilence": 813,
+      "zombieExitMsAfterSilence": 10254,
       "fencedBeforeReap": true,
       "zombieExit": 70,
       "fenceLine": "[recovery] FENCED: this executor was reaped by t9c-b; exiting so work is not run twice",
@@ -779,14 +795,14 @@
           4
         ]
       },
-      "healthSamples": 35,
+      "healthSamples": 36,
       "healthTimeline": [
         "idle",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 14846,
+        "t": 15053,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
