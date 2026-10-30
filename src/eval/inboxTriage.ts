@@ -11,7 +11,7 @@ import { BATCH, CATEGORIES, classify, features, heuristic, triagePrompt, TriageS
 import { sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
 
 // Bump when a check's logic changes, so a score change can be told apart from a model or prompt change.
-export const EVALUATOR_VERSION = '1';
+export const EVALUATOR_VERSION = '2'; // 2: draft_sender_facing
 const CORPUS = new URL('../../evals/inbox-triage/corpus.json', import.meta.url);
 const Cat = z.enum(CATEGORIES);
 
@@ -50,8 +50,8 @@ export function loadCorpus(file: URL | string = CORPUS) {
 
 // ---------- checks (pure; unit-tested in scripts/test-eval.ts) ----------
 
-const strip = (s: string) => s.replace(/\[[^\]\n]{1,40}\]/g, ' ');
-export const placeholders = (draft: string) => (draft.match(/\[[^\]\n]{1,40}\]/g) ?? []).length;
+const strip = (s: string) => s.replace(/\[[^\]\n]{1,80}\]/g, ' ');
+export const placeholders = (draft: string) => (draft.match(/\[[^\]\n]{1,80}\]/g) ?? []).length;
 const sentences = (s: string) => s.split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter(Boolean);
 
 const COMMIT = /\b(i'?ll|i will|i can|i'?m going to|i am going to|will (have|get|send|share|do)|you'?ll (have|get))\b/i;
@@ -69,10 +69,17 @@ export function unsupportedFacts(draft: string, source: string): string[] {
   return [...new Set((strip(draft).match(FACT) ?? []).map((t) => t.toLowerCase()))].filter((t) => !src.includes(t));
 }
 
+/** Parts of a draft that talk to the owner instead of the sender: a [placeholder] asking or telling them something, or a note. */
+export function ownerFacing(draft: string): string[] {
+  const inBrackets = (draft.match(/\[[^\]\n]{1,80}\]/g) ?? []).filter((b) => /\?|\b(you|your)\b/i.test(b));
+  const notes = draft.match(/\b(note to self|before sending|confirm with|check whether you)\b[^.!?\n]*/gi) ?? [];
+  return [...inBrackets, ...notes];
+}
+
 const META = /\b(get back to you|circle back|follow up with you|let you know (when|once|if)|keep you posted|update you)\b/i;
 const SIGNOFF = /(^|\n)\s*(best|regards|cheers|sincerely|thanks|thank you|best regards|kind regards)\s*,\s*(\n|$)/i;
 
-export function checkScenario(s: Scenario, f: Features, out: { category: Category; summary: string; draft: string | null; returned: boolean }): Check[] {
+export function checkScenario(s: Scenario, f: Features, out: { category: Category; summary: string; draft: string | null; ownerNote?: string | null; returned: boolean }): Check[] {
   const e = s.expect;
   const src = `${s.email.from} ${s.email.subject} ${s.email.body}`;
   const checks: Check[] = [
@@ -94,6 +101,8 @@ export function checkScenario(s: Scenario, f: Features, out: { category: Categor
       const c = commitsToDeadline(out.draft, e.deadline);
       checks.push({ id: 'deadline_not_committed', critical: true, pass: !c, detail: c ? `commits to "${e.deadline}"` : undefined });
     }
+    const toOwner = ownerFacing(out.draft);
+    checks.push({ id: 'draft_sender_facing', critical: true, pass: !toOwner.length, detail: toOwner.length ? toOwner.join(' | ') : undefined });
     const facts = unsupportedFacts(out.draft, src);
     checks.push({ id: 'no_unsupported_facts', critical: true, pass: !facts.length, detail: facts.length ? facts.join(', ') : undefined });
     // quality (REPORT only)
@@ -150,11 +159,11 @@ export function inboxTriageSuite(db: pg.Pool, opts: { corpusFile?: URL | string 
       const { model } = plainModel(a.model);
       const picked = corpus.scenarios.filter((s) => splits.includes(s.split));
       const items = picked.map((s, i) => ({ s, f: features(toMessage(s, i)) }));
-      const outs = new Map<string, { category: Category; summary: string; draft: string | null; returned: boolean }>();
+      const outs = new Map<string, { category: Category; summary: string; draft: string | null; ownerNote: string | null; returned: boolean }>();
       const forModel: Features[] = [];
       for (const { f } of items) {
         const h = heuristic(f);
-        if (h) outs.set(f.ref, { ...h, draft: null, returned: true });
+        if (h) outs.set(f.ref, { ...h, draft: null, ownerNote: null, returned: true });
         else forModel.push(f);
       }
       // Same batch size as production: batch composition is part of what we measure.

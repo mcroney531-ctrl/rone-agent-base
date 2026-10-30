@@ -116,6 +116,8 @@ try {
   const detail = (await call('GET', `/attention/approval_needed/${drafts[0].id}`)).body;
   check('the drill-in shows the full draft and hides Gmail plumbing (ids, headers)', detail.facts.some((f: { label: string; value: string }) => f.label === 'Draft' && /works for me at \[time\]/.test(f.value))
     && !detail.facts.some((f: { label: string }) => ['Message Id', 'Thread Id', 'In Reply To', 'Connection Id'].includes(f.label)), detail.facts);
+  check('a note for the owner is shown beside the draft, never inside it', detail.facts.some((f: { label: string; value: string }) => f.label === 'Note for you' && /Pick a time/.test(f.value))
+    && !detail.facts.some((f: { label: string; value: string }) => f.label === 'Draft' && /Pick a time/.test(f.value)) && /Note for you: Pick a time/.test(card?.summary ?? ''), { facts: detail.facts, summary: card?.summary });
 
   // ---- second run, no new mail: nothing re-read, nothing re-proposed ----
   const r2 = await runTriage();

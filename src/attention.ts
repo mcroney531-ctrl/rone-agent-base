@@ -58,7 +58,8 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
         // Quote the first real sentence, not the greeting.
         const lines = String(p.draft ?? '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
         const first = lines.find((l) => !/^(hi|hello|hey|dear)\b[^.!?]*,?$/i.test(l)) ?? lines[0] ?? '';
-        return `${p.fromName ?? p.from ?? ''} · ${p.subject ?? ''}\n${p.summary ?? ''}\n“${first.length > 140 ? `${first.slice(0, 140)}…` : first}”`;
+        return `${p.fromName ?? p.from ?? ''} · ${p.subject ?? ''}\n${p.summary ?? ''}\n“${first.length > 140 ? `${first.slice(0, 140)}…` : first}”`
+          + (p.ownerNote ? `\nNote for you: ${p.ownerNote}` : '');
       }
       return r.detail ?? '';
     },
@@ -148,6 +149,7 @@ export async function attentionDetail(kind: string, ref: string) {
       if (a.logical_action === 'gmail.draft') {
         // Read like an email: who wrote, what about, then the reply that approving will create as a Gmail draft.
         add('From', p.from); add('Subject', p.subject); add('Summary', p.summary);
+        add('Note for you', p.ownerNote); // the agent's question to the owner; never part of the draft
         if (p.to && p.to !== p.from) add('Reply to', p.to);
         add('Draft', p.draft);
       } else {

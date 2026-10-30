@@ -14,7 +14,7 @@ function check(name: string, cond: boolean, detail?: unknown) {
 const { url, db } = await freshDb('spike_eval');
 process.env.DATABASE_URL = url;
 delete process.env.ANTHROPIC_API_KEY; // the scripted model, never a paid one, in CI
-const { commitsToDeadline, placeholders, unsupportedFacts, loadCorpus, inboxTriageSuite } = await import('../src/eval/inboxTriage.js');
+const { commitsToDeadline, ownerFacing, placeholders, unsupportedFacts, loadCorpus, inboxTriageSuite } = await import('../src/eval/inboxTriage.js');
 const { runSuite, score } = await import('../src/eval/harness.js');
 
 // ---- checks ----
@@ -24,6 +24,10 @@ check('deadline: acknowledging it is not', !commitsToDeadline('Yes, I can send t
   && !commitsToDeadline('Yes, I can send the notes over. I\'ll confirm timing shortly.', 'Friday')
   && !commitsToDeadline('I\'ll send them by [day].', 'Friday'));
 check('placeholders are counted', placeholders('Works for me at [time] on [day].') === 2 && placeholders('Yes, at [time].') === 1 && placeholders('Sure!') === 0);
+check('sender-facing: a bracket asking or telling the owner something is caught', ownerFacing('Happy to look at slides 4-9. [Can you make that deadline?]').length === 1
+  && ownerFacing('Happy to help. [when you can send them]').length === 1 && ownerFacing('Sure. Note to self: confirm with Dana first.').length === 1);
+check('sender-facing: fill-in slots and one choice slot are fine', ownerFacing('Thanks for the invite! [Yes, I\'ll be there / Sorry, I can\'t make it].').length === 0
+  && ownerFacing('Works for me at [time].').length === 0 && ownerFacing('Thanks, you made my day.').length === 0);
 check('unsupported facts: invented days, times and numbers are caught', JSON.stringify(unsupportedFacts('How about Tuesday at 3pm? My rate is $1,200.', 'Do you have time next week?'))
   === JSON.stringify(['tuesday', '3pm', '1,200']), unsupportedFacts('How about Tuesday at 3pm? My rate is $1,200.', 'Do you have time next week?'));
 check('unsupported facts: facts from the email and [placeholders] are fine', unsupportedFacts('Yes, Thursday works. Around [time]?', 'Free for lunch Thursday?').length === 0);
@@ -65,7 +69,7 @@ try {
   const r1 = await runSuite(pool, inboxTriageSuite(pool), ['dev', 'holdout']);
   const run = (await db.query(`select * from ops.eval_runs where id = $1`, [r1.runId])).rows[0];
   check('run records full provenance', Boolean(run.git_commit && run.prompt_hash && run.model === 'claude-sonnet-5-5' && run.model_config?.provider === 'mock'
-    && run.schema_version && run.corpus_version === '2' && run.corpus_hash && run.evaluator_version && run.finished_at), run);
+    && run.schema_version && run.corpus_version === '3' && run.corpus_hash && run.evaluator_version && run.finished_at), run);
   const results = (await db.query(`select split, count(*)::int n from ops.eval_results where run_id = $1 group by 1 order by 1`, [r1.runId])).rows;
   check('every scenario is recorded with its split', JSON.stringify(results) === JSON.stringify([{ split: 'dev', n: dev }, { split: 'holdout', n: holdout }]), results);
   check('status follows critical invariants (BLOCK), metrics are stored (REPORT)', run.status === (r1.metrics.critical.length ? 'failed' : 'passed')
