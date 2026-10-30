@@ -114,7 +114,7 @@ try {
     && /Dana Lee · Intro call Thursday\?/.test(card.summary) && /“Thanks for reaching out/.test(card.summary)
     && card.actions.map((a) => a.label).join() === 'Approve draft,Reject' && card.source === 'Inbox Triage', card);
   const detail = (await call('GET', `/attention/approval_needed/${drafts[0].id}`)).body;
-  check('the drill-in shows the full draft and hides Gmail plumbing (ids, headers)', detail.facts.some((f: { label: string; value: string }) => f.label === 'Draft' && /get back to you/.test(f.value))
+  check('the drill-in shows the full draft and hides Gmail plumbing (ids, headers)', detail.facts.some((f: { label: string; value: string }) => f.label === 'Draft' && /works for me at \[time\]/.test(f.value))
     && !detail.facts.some((f: { label: string }) => ['Message Id', 'Thread Id', 'In Reply To', 'Connection Id'].includes(f.label)), detail.facts);
 
   // ---- second run, no new mail: nothing re-read, nothing re-proposed ----
