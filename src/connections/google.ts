@@ -2,6 +2,9 @@
 // access for a refresh token, least-privilege scopes:
 //   calendar.readonly     read the real calendar (source of truth for the schedule; never written)
 //   calendar.app.created  create the Agent Ops calendar and manage events ONLY on calendars this app made
+//   gmail.modify          Inbox Triage: read mail, add Agent Ops/* labels, create drafts. Google lets this scope
+//                         send mail too; "never send" is enforced at the capability boundary instead
+//                         (src/connections/gmail.ts exposes no send/delete/trash/archive method at all).
 // Endpoints are env-overridable so the whole lifecycle runs against a fake Google in CI.
 import { OpsError } from '../errors.js';
 import {
@@ -14,6 +17,7 @@ export const GOOGLE_SCOPES = [
   'email',
   'https://www.googleapis.com/auth/calendar.readonly',
   'https://www.googleapis.com/auth/calendar.app.created',
+  'https://www.googleapis.com/auth/gmail.modify',
 ];
 
 const cfg = () => ({

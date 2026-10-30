@@ -44,7 +44,8 @@ try {
   check('callback completes and names the account', cb.status === 200 && cb.body.includes('rone@example.com'), cb);
 
   const conn = await one(db, `select status, account_label, scopes from ops.connections where id = 'google:primary'`);
-  check('connection active with account + granted scopes', conn.status === 'active' && conn.account_label === 'rone@example.com' && conn.scopes.length === 2, conn);
+  check('connection active with account + granted scopes', conn.status === 'active' && conn.account_label === 'rone@example.com' && conn.scopes.length === 3
+    && conn.scopes.includes('https://www.googleapis.com/auth/gmail.modify'), conn); // calendar.readonly, calendar.app.created, gmail.modify
 
   const secret = await one(db, `select ciphertext, key_version from ops.connection_secrets where connection_id = 'google:primary'`);
   check('refresh token stored encrypted (no plaintext)', secret && !Buffer.from(secret.ciphertext).toString('utf8').includes('rt-'), { key_version: secret?.key_version });

@@ -125,6 +125,12 @@ Recovery has two thresholds:
 
 Change these as a ratio, never one number on its own. `LEASE_FRACTION=0` disables the lease and exists only for the failure suite (**t9c**). If the lease ever fails, DBOS's ownership check is the backstop: a stale checkpoint is rejected and Rule 6 keeps it from becoming a false failure.
 
+## Rule 8: a provider capability is the narrowest module that can do the job
+
+When a provider's OAuth scope allows more than an agent may do (Gmail's `gmail.modify` can send), the limit lives in code: one module per provider exposes only the allowed operations, with a private fetch and no raw client exported (`src/connections/gmail.ts`: read inbox, add `Agent Ops/*` labels, find/create drafts; no send). The executor refuses any other action of that provider, and the test fake records forbidden calls so a test asserts there were none.
+
+For a provider with no idempotency key, put a deterministic identity on the effect and look for it before creating (a draft's Message-ID derived from the action's idempotency key). That's the Rule 3 fallback, done in the provider module.
+
 ## Workflow IDs are how duplicates die
 
 Starting a workflow with an ID that already exists returns the existing one; it doesn't start a second. Every entry point picks a deterministic ID:
@@ -161,3 +167,4 @@ Three consequences:
 - [ ] New entry point? Deterministic workflow ID
 - [ ] New `catch` in a workflow body? Rethrows DBOS control errors first (Rule 6)
 - [ ] Touched `HEARTBEAT_MS` / `DEAD_AFTER_MS` / `LEASE_FRACTION`? The lease still expires well before the reap (Rule 7)
+- [ ] New provider action? It goes through that provider's capability module, never a raw client (Rule 8)

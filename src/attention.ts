@@ -36,7 +36,12 @@ const A = {
 } satisfies Record<string, ItemAction>;
 
 const humanize = (id: string) => id.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_:.]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
-const ACTION_NAMES: Record<string, string> = { 'agentops.hold': 'Add prep hold', 'email.draft': 'Draft email', 'crm.note': 'CRM note', 'calendar.hold': 'Calendar hold' };
+const ACTION_NAMES: Record<string, string> = {
+  'agentops.hold': 'Add prep hold', 'email.draft': 'Draft email', 'crm.note': 'CRM note', 'calendar.hold': 'Calendar hold',
+  'gmail.draft': 'Draft reply', 'gmail.label': 'Label email',
+};
+// Payload fields that are plumbing, not something the owner reads.
+const HIDDEN_FIELDS = new Set(['start', 'end', 'connectionId', 'briefDate', 'messageId', 'threadId', 'inReplyTo', 'references', 'fromName']);
 
 // One entry per attention kind. `title`/`summary` get the row; actions are what the owner can do from the phone.
 const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; summary?: (r: Row) => string; actions: (r: Row) => ItemAction[] }> = {
@@ -48,9 +53,16 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
       if (r.extra?.logical_action === 'agentops.hold' && p.start) {
         return `${p.title ?? 'Hold'} · ${fmtRange(p.start, p.end)}${p.movedFrom ? ' (moved: the earlier slot was taken)' : ''}`;
       }
+      // Approving creates the draft in Gmail (the side effect); the owner can still edit it there before sending.
+      if (r.extra?.logical_action === 'gmail.draft') {
+        // Quote the first real sentence, not the greeting.
+        const lines = String(p.draft ?? '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
+        const first = lines.find((l) => !/^(hi|hello|hey|dear)\b[^.!?]*,?$/i.test(l)) ?? lines[0] ?? '';
+        return `${p.fromName ?? p.from ?? ''} · ${p.subject ?? ''}\n${p.summary ?? ''}\n“${first.length > 140 ? `${first.slice(0, 140)}…` : first}”`;
+      }
       return r.detail ?? '';
     },
-    actions: () => [A.approve, A.reject],
+    actions: (r) => (r.extra?.logical_action === 'gmail.draft' ? [{ ...A.approve, label: 'Approve draft' }, A.reject] : [A.approve, A.reject]),
   },
   brief_ready: { severity: 'info', title: () => 'Brief is ready', actions: () => [A.open, A.dismiss] },
   deeper_ready: { severity: 'info', title: () => 'Deeper prep ready', actions: () => [A.open, A.dismiss] },
@@ -62,7 +74,8 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
   run_failed: { severity: 'problem', title: () => 'Run failed', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
   action_failed: {
     severity: 'problem',
-    title: (r) => (r.extra?.logical_action === 'agentops.hold' ? 'Prep hold no longer fits' : 'Action failed'),
+    title: (r) => (r.extra?.logical_action === 'agentops.hold' ? 'Prep hold no longer fits'
+      : r.extra?.logical_action === 'gmail.draft' ? 'Draft not created' : 'Action failed'),
     actions: () => [A.dismiss],
   },
   brief_mirror_failed: { severity: 'problem', title: () => 'Calendar mirror not written', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
@@ -132,8 +145,15 @@ export async function attentionDetail(kind: string, ref: string) {
     if (a) {
       add('Action', ACTION_NAMES[a.logical_action] ?? a.logical_action); add('Risk', a.risk_level); add('Status', humanize(a.status));
       const p = a.payload ?? {};
-      if (p.start) add('When', fmtRange(p.start, p.end));
-      for (const [k2, v] of Object.entries(p)) if (!['start', 'end', 'connectionId', 'briefDate'].includes(k2)) add(humanize(k2), v);
+      if (a.logical_action === 'gmail.draft') {
+        // Read like an email: who wrote, what about, then the reply that approving will create as a Gmail draft.
+        add('From', p.from); add('Subject', p.subject); add('Summary', p.summary);
+        if (p.to && p.to !== p.from) add('Reply to', p.to);
+        add('Draft', p.draft);
+      } else {
+        if (p.start) add('When', fmtRange(p.start, p.end));
+        for (const [k2, v] of Object.entries(p)) if (!HIDDEN_FIELDS.has(k2)) add(humanize(k2), v);
+      }
       add('Error', a.error); add('Proposed by run', a.source_workflow_id);
     }
   } else if (kind === 'connection_problem') {

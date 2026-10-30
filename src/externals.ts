@@ -4,6 +4,8 @@
 //   GET  /stats    attempts vs unique committed effects (what the crash-window test measures)
 //   POST /faults   inject provider failures: {"failNext": 3, "status": 503}
 //   /google/*      fake Google OAuth + Calendar (consent, token, userinfo, calendars, events, revoke)
+//   /google/gmail/* fake Gmail (profile, messages, history, labels, drafts); every send/delete/trash attempt
+//                   is refused AND recorded, so tests can assert the system never tried
 // Storage: Postgres (fake_provider schema) when FAKE_PROVIDER_DATABASE_URL is set, otherwise in memory —
 // deployed, it must not spend the Supabase session pooler's small connection budget.
 import http from 'node:http';
@@ -96,6 +98,7 @@ const G = {
   codes: new Map<string, { refresh: string; scope: string }>(),
   refresh: new Map<string, { revoked: boolean; scope: string }>(),
   access: new Set<string>(),
+  accessScope: new Map<string, string>(),
   calendars: new Map<string, { id: string; summary: string }>(),
   events: [] as Record<string, unknown>[],                                   // the user's primary calendar (read-only to us)
   appEvents: new Map<string, Map<string, Record<string, unknown>>>(),       // events on app-created calendars
@@ -138,6 +141,7 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
     const issue = (refresh: string, scope: string, includeRefresh: boolean) => {
       const access = `at-${randomUUID()}`;
       G.access.add(access);
+      G.accessScope.set(access, scope);
       send(res, 200, { access_token: access, expires_in: 3599, token_type: 'Bearer', scope, ...(includeRefresh ? { refresh_token: refresh } : {}) });
     };
     if (f.get('grant_type') === 'authorization_code') {
@@ -165,13 +169,14 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
     return send(res, 200, { ...G.stats, calendars: [...G.calendars.values()], appEvents }), true;
   }
   if (p === '/google/admin/reset' && req.method === 'POST') {
-    G.calendars.clear(); G.appEvents.clear(); G.events = []; G.stats = freshStats();
+    G.calendars.clear(); G.appEvents.clear(); G.events = []; G.stats = freshStats(); resetGmail();
     return send(res, 200, { ok: true }), true;
   }
   if (p === '/google/admin/events' && req.method === 'POST') {
     G.events = ((await readBody(req)) as Record<string, unknown>[]) ?? [];
     return send(res, 200, { events: G.events.length }), true;
   }
+  if (p.startsWith('/google/admin/gmail/') || p.startsWith('/google/gmail/')) return fakeGmail(req, res, u, bearer);
   if (!p.startsWith('/google/userinfo') && !p.startsWith('/google/calendar/')) return false;
   if (!authed) return send(res, 401, { error: { code: 401, message: 'Invalid Credentials' } }), true;
   if (p === '/google/userinfo') return send(res, 200, { email: 'rone@example.com', email_verified: true }), true;
@@ -244,6 +249,120 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
 
 const PUSHES: { id: string; headers: Record<string, string>; body: string }[] = [];
 const FLAKY = { count: 0 };
+
+// ---------- fake Gmail ----------
+type GmMsg = { id: string; threadId: string; labelIds: string[]; internalDate: number; headers: { name: string; value: string }[]; body: string };
+const GM = {
+  historyId: 1000, minHistoryId: 1000,
+  messages: new Map<string, GmMsg>(),
+  history: [] as { id: number; messageId: string }[],
+  labels: new Map<string, { id: string; name: string }>(),
+  drafts: new Map<string, { id: string; messageId: string }>(),
+  forbidden: [] as string[],
+  seq: 0,
+};
+function resetGmail() {
+  GM.historyId = 1000; GM.minHistoryId = 1000; GM.messages.clear(); GM.history = []; GM.labels.clear(); GM.drafts.clear(); GM.forbidden = []; GM.seq = 0;
+}
+const SYSTEM_LABELS = ['INBOX', 'UNREAD', 'DRAFT', 'SENT', 'TRASH', 'SPAM', 'CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
+const gmHeader = (m: GmMsg, n: string) => m.headers.find((h) => h.name.toLowerCase() === n.toLowerCase())?.value;
+
+async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u: URL, bearer: string): Promise<boolean> {
+  const p = u.pathname;
+  if (p === '/google/admin/gmail/messages' && req.method === 'POST') {
+    const list = (await readBody(req)) as { id?: string; threadId?: string; from: string; to?: string; subject: string; body: string; labelIds?: string[]; ageMinutes?: number; headers?: Record<string, string> }[];
+    for (const x of list) {
+      const id = x.id ?? `m${++GM.seq}`;
+      const headers = Object.entries({ From: x.from, To: x.to ?? 'rone@example.com', Subject: x.subject, 'Message-ID': `<${id}@mail.example>`, ...(x.headers ?? {}) })
+        .map(([name, value]) => ({ name, value }));
+      GM.messages.set(id, { id, threadId: x.threadId ?? `t-${id}`, labelIds: x.labelIds ?? ['INBOX', 'UNREAD'], internalDate: Date.now() - (x.ageMinutes ?? 5) * 60_000, headers, body: x.body });
+      GM.history.push({ id: ++GM.historyId, messageId: id });
+    }
+    return send(res, 200, { historyId: GM.historyId }), true;
+  }
+  if (p === '/google/admin/gmail/expire-history' && req.method === 'POST') {
+    GM.minHistoryId = GM.historyId + 1;
+    return send(res, 200, { minHistoryId: GM.minHistoryId }), true;
+  }
+  if (p === '/google/admin/gmail/state') {
+    const labelName = (id: string) => GM.labels.get(id)?.name ?? id;
+    return send(res, 200, {
+      historyId: GM.historyId, labels: [...GM.labels.values()], forbidden: GM.forbidden,
+      messages: [...GM.messages.values()].map((m) => ({ id: m.id, threadId: m.threadId, labels: m.labelIds.map(labelName), subject: gmHeader(m, 'Subject') })),
+      drafts: [...GM.drafts.values()].map((d) => {
+        const m = GM.messages.get(d.messageId)!;
+        return { id: d.id, threadId: m.threadId, to: gmHeader(m, 'To'), subject: gmHeader(m, 'Subject'), inReplyTo: gmHeader(m, 'In-Reply-To'), messageIdHeader: gmHeader(m, 'Message-ID'), body: m.body };
+      }),
+    }), true;
+  }
+
+  const scope = G.accessScope.get(bearer);
+  if (!G.access.has(bearer)) return send(res, 401, { error: { code: 401, message: 'invalid credentials' } }), true;
+  if (!scope?.split(' ').includes('https://www.googleapis.com/auth/gmail.modify')) {
+    return send(res, 403, { error: { code: 403, message: 'Request had insufficient authentication scopes.' } }), true;
+  }
+  const r = /^\/google\/gmail\/v1\/users\/me(\/.*)$/.exec(p)?.[1] ?? '';
+  const refuse = () => { GM.forbidden.push(`${req.method} ${r}`); return send(res, 403, { error: { code: 403, message: 'forbidden in this fake: Agent Ops must never do this' } }), true; };
+
+  if (r === '/profile' && req.method === 'GET') return send(res, 200, { emailAddress: 'rone@example.com', historyId: String(GM.historyId) }), true;
+  if (r === '/messages' && req.method === 'GET') {
+    const q = u.searchParams.get('q') ?? '';
+    let list = [...GM.messages.values()];
+    const msgid = /rfc822msgid:(\S+)/.exec(q)?.[1];
+    if (msgid) list = list.filter((m) => gmHeader(m, 'Message-ID') === msgid);
+    if (/in:drafts/.test(q)) list = list.filter((m) => m.labelIds.includes('DRAFT'));
+    if (/in:inbox/.test(q)) list = list.filter((m) => m.labelIds.includes('INBOX'));
+    const days = /newer_than:(\d+)d/.exec(q)?.[1];
+    if (days) list = list.filter((m) => m.internalDate > Date.now() - Number(days) * 86_400_000);
+    list.sort((a, b) => b.internalDate - a.internalDate);
+    return send(res, 200, { messages: list.map((m) => ({ id: m.id, threadId: m.threadId })), resultSizeEstimate: list.length }), true;
+  }
+  const mm = /^\/messages\/([^/]+)(\/modify)?$/.exec(r);
+  if (mm && req.method === 'GET' && !mm[2]) {
+    const m = GM.messages.get(decodeURIComponent(mm[1]));
+    if (!m) return send(res, 404, { error: { code: 404, message: 'Requested entity was not found.' } }), true;
+    return send(res, 200, {
+      id: m.id, threadId: m.threadId, labelIds: m.labelIds, internalDate: String(m.internalDate), snippet: m.body.slice(0, 100),
+      payload: { mimeType: 'text/plain', headers: m.headers, body: { data: Buffer.from(m.body).toString('base64url') } },
+    }), true;
+  }
+  if (mm && mm[2] && req.method === 'POST') {
+    const m = GM.messages.get(decodeURIComponent(mm[1]));
+    if (!m) return send(res, 404, { error: { code: 404 } }), true;
+    const body = (await readBody(req)) as { addLabelIds?: string[]; removeLabelIds?: string[] };
+    // Agent Ops may only ADD its own labels: touching system labels or removing anything is a violation.
+    if (body.removeLabelIds?.length || (body.addLabelIds ?? []).some((l) => SYSTEM_LABELS.includes(l) || !GM.labels.get(l)?.name.startsWith('Agent Ops/'))) return refuse();
+    for (const l of body.addLabelIds ?? []) if (!m.labelIds.includes(l)) m.labelIds.push(l);
+    return send(res, 200, { id: m.id, labelIds: m.labelIds }), true;
+  }
+  if (r === '/history' && req.method === 'GET') {
+    const start = Number(u.searchParams.get('startHistoryId'));
+    if (start < GM.minHistoryId) return send(res, 404, { error: { code: 404, message: 'Requested entity was not found.' } }), true;
+    const history = GM.history.filter((h) => h.id > start && GM.messages.get(h.messageId)?.labelIds.includes('INBOX'))
+      .map((h) => ({ id: String(h.id), messagesAdded: [{ message: { id: h.messageId, threadId: GM.messages.get(h.messageId)!.threadId, labelIds: GM.messages.get(h.messageId)!.labelIds } }] }));
+    return send(res, 200, { history, historyId: String(GM.historyId) }), true;
+  }
+  if (r === '/labels' && req.method === 'GET') return send(res, 200, { labels: [...GM.labels.values()] }), true;
+  if (r === '/labels' && req.method === 'POST') {
+    const body = (await readBody(req)) as { name: string };
+    if ([...GM.labels.values()].some((l) => l.name === body.name)) return send(res, 409, { error: { code: 409, message: 'Label name exists' } }), true;
+    const label = { id: `Label_${GM.labels.size + 1}`, name: body.name };
+    GM.labels.set(label.id, label);
+    return send(res, 200, label), true;
+  }
+  if (r === '/drafts' && req.method === 'POST') {
+    const body = (await readBody(req)) as { message: { threadId: string; raw: string } };
+    const text = Buffer.from(body.message.raw, 'base64url').toString('utf8');
+    const [head, ...rest] = text.split('\r\n\r\n');
+    const headers = head.split('\r\n').map((l) => { const i = l.indexOf(':'); return { name: l.slice(0, i), value: l.slice(i + 1).trim() }; });
+    const id = `d${++GM.seq}`;
+    GM.messages.set(id, { id, threadId: body.message.threadId, labelIds: ['DRAFT'], internalDate: Date.now(), headers, body: rest.join('\r\n\r\n') });
+    const draft = { id: `r-${id}`, messageId: id };
+    GM.drafts.set(draft.id, draft);
+    return send(res, 200, { id: draft.id, message: { id, threadId: body.message.threadId } }), true;
+  }
+  return refuse(); // send, drafts/send, delete, trash, batchModify, settings … none of it is ours to do
+}
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];

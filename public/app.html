@@ -146,6 +146,8 @@ function describeSchedule(cron, tz) {
     const d = new Date(Date.UTC(2000, 0, 1, +hour, +min));
     return `Daily ${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} ${zone}`;
   }
+  const every = /^\*\/(\d+)$/.exec(min);
+  if (every && hour === '*' && dom === '*' && mon === '*' && dow === '*') return `Every ${every[1]} minutes`;
   return `Schedule ${cron} (${tz})`;
 }
 const enc = encodeURIComponent;
