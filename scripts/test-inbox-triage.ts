@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { AttentionItemSchema } from '../src/compat.js';
 import { EXTERNALS, LOG_DIR, all, freshDb, killAllWorkers, one, startWorker, waitFor, type Worker } from './lib.js';
 
 const PORT = 7870;
@@ -162,7 +163,7 @@ try {
   const att = (await call('GET', '/attention')).body as { type: string; source: string; id: string; title: string; summary: string; actions: unknown[]; severity: string; createdAt: string }[];
   const sources = new Set(att.map((i) => i.source));
   check('Needs You holds items from BOTH producers in one list with one shape', sources.has('Calendar Prep') && sources.has('Inbox Triage')
-    && att.every((i) => ['id', 'type', 'source', 'title', 'summary', 'actions', 'severity', 'createdAt'].every((k) => k in i)), att.map((i) => `${i.source}: ${i.title}`));
+    && att.every((i) => AttentionItemSchema.safeParse(i).success), att.map((i) => `${i.source}: ${i.title}`));
   await call('POST', '/agents/inbox-triage/pause', {});
   const agentsList = (await call('GET', '/agents')).body as { id: string; health_state: string; paused_at: string | null }[];
   const st = Object.fromEntries(agentsList.map((a) => [a.id, a.health_state]));

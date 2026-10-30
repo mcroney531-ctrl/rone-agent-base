@@ -18,6 +18,7 @@ import { actOnAttention, AgentPausedError, assertNotPaused, attentionDetail, lis
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
+import { assertServedClientCompatible, CLIENT_COMPAT_HEADER, outdatedClient } from './compat.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
   console.warn('[main] UNSAFE_SKIP_CONNECTION_GUARD=1 — connection-mode guard disabled (failure-suite only)');
@@ -48,6 +49,8 @@ const APP_SW = fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf
 const APP_SESSION_JS = fs.readFileSync(new URL('../public/session.js', import.meta.url), 'utf8');
 // Identifies the phone-app code this worker serves; an open tab compares it on resume and reloads when it changed.
 const APP_BUILD = createHash('sha256').update(APP_HTML).update(APP_SW).update(APP_SESSION_JS).digest('hex').slice(0, 12);
+// Boot refuses a MIN_CLIENT_COMPAT that the app it serves doesn't meet (a fresh page would reload forever).
+assertServedClientCompatible(APP_HTML);
 const APP_ICONS = new Map(fs.readdirSync(new URL('../public/icons/', import.meta.url))
   .filter((f) => f.endsWith('.png')).map((f) => [f, fs.readFileSync(new URL(`../public/icons/${f}`, import.meta.url))]));
 
@@ -183,6 +186,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/app/manifest.webmanifest') {
       return res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(APP_MANIFEST);
     }
+
+    // Compatibility contract (src/compat.ts): a phone-app call from a client too old for this API is refused
+    // before it does anything, and the app reloads.
+    const outdated = outdatedClient(req.headers[CLIENT_COMPAT_HEADER]);
+    if (outdated) return send(res, 426, outdated);
 
     const auth = await authenticate(req);
     if (!auth.ok) return send(res, auth.status, { error: auth.error });
