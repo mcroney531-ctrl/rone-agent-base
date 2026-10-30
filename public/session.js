@@ -12,7 +12,11 @@ export class AuthError extends Error {}
 
 // beforeRequest runs (and is awaited) before every API call: the app uses it to hold requests while it
 // checks that this tab is still running the deployed build (a stale tab reloads instead of calling out).
-export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSession = () => {}, reuseMs = 10_000, beforeRequest = async () => {} }) {
+// clientCompat is sent on every call (x-client-compat); a server this client is too old for answers 426,
+// and onOutdated runs (the app reloads) instead of the response being used. See src/compat.ts.
+export class OutdatedError extends Error {}
+export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSession = () => {}, reuseMs = 10_000, beforeRequest = async () => {},
+  clientCompat, onOutdated = async () => {} }) {
   let refreshing = null;               // the in-flight forced refresh, shared by every caller
   let lastRefresh = { at: 0, token: '' };
   let signingOut = null;
@@ -54,11 +58,12 @@ export function createSessionApi({ sb, fetchImpl = (...a) => fetch(...a), onSess
   async function api(path, opts = {}) {
     const call = (token) => fetchImpl(path, {
       method: opts.method ?? 'GET',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, ...(clientCompat ? { 'x-client-compat': String(clientCompat) } : {}) },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     await beforeRequest();
     let res = await call(await currentToken());
+    if (res.status === 426) { await onOutdated(); throw new OutdatedError('This app is out of date. Reload to update.'); }
     if (res.status === 401) {
       const fresh = sb ? await forcedToken() : '';
       if (fresh) res = await call(fresh);

@@ -1,5 +1,6 @@
 // Mobile #1a: single-owner auth + the generic "Needs You" inbox API.
 // Usage (externals running, Postgres at PG_ADMIN_URL): npx tsx scripts/test-mobile.ts
+import { AttentionDetailSchema, AttentionItemSchema, MIN_CLIENT_COMPAT } from '../src/compat.js';
 import { EXTERNALS, freshDb, killAllWorkers, one, startWorker } from './lib.js';
 
 const PORT = 7850;
@@ -18,9 +19,9 @@ const w = await startWorker({
     GOOGLE_REDIRECT_URI: `http://127.0.0.1:${PORT}/oauth/google/callback`, GOOGLE_AUTH_URL: `${EXTERNALS}/google/auth`,
   },
 });
-const call = async (method: string, path: string, token?: string, body?: unknown) => {
+const call = async (method: string, path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) => {
   const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
-    method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined,
+    method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined,
   });
   const text = await r.text();
   let parsed: any = text;
@@ -50,6 +51,18 @@ try {
   check('owner session (email matched case-insensitively) and API token → 200', owner.status === 200 && machine.status === 200, [owner.status, machine.status]);
   check('old routes are guarded the same way', (await call('GET', '/health')).status === 401 && (await call('GET', '/health', OWNER)).status === 200);
 
+  // ---- compatibility contract (src/compat.ts) ----
+  const current = await call('GET', '/attention', OWNER, undefined, { 'x-client-compat': String(MIN_CLIENT_COMPAT) });
+  const newer = await call('GET', '/attention', OWNER, undefined, { 'x-client-compat': String(MIN_CLIENT_COMPAT + 5) });
+  const old = await call('POST', '/agents/spike-agent/run', OWNER, { requestId: 'from-old-tab' }, { 'x-client-compat': String(MIN_CLIENT_COMPAT - 1) });
+  const junk = await call('GET', '/attention', OWNER, undefined, { 'x-client-compat': 'abc' });
+  const oldStarted = await one(db, `select count(*)::int n from ops.runs where workflow_id = 'manual-spike-agent-from-old-tab'`);
+  check('compat: current and newer clients pass; no header (API token, scripts) is not checked', current.status === 200 && newer.status === 200 && owner.status === 200, [current.status, newer.status]);
+  check('compat: an outdated client gets 426 client_outdated and its call does nothing', old.status === 426 && old.body.error === 'client_outdated'
+    && old.body.minCompat === MIN_CLIENT_COMPAT && junk.status === 426 && oldStarted.n === 0, { old, junk, oldStarted });
+  const served = /const CLIENT_COMPAT = (\d+);/.exec(shell.body)?.[1];
+  check('compat: the served app declares a CLIENT_COMPAT the server accepts', Number(served) >= MIN_CLIENT_COMPAT, served);
+
   // ---- seed one item of several producers ----
   const act = await one(db, `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
     values ('spike-agent', 'seed-wf', 'crm.note', 'ada@example.com', '{"note":"hello"}', 'low', 'seed:crm.note:1') returning id`);
@@ -67,6 +80,8 @@ try {
   const shapeOk = list.length >= 4 && list.every((i) => ['id', 'type', 'ref', 'source', 'title', 'summary', 'severity', 'createdAt', 'actions'].every((k) => k in i)
     && Array.isArray(i.actions));
   check('every item renders from one generic shape', shapeOk, list);
+  const bad = list.filter((i) => !AttentionItemSchema.safeParse(i).success);
+  check('contract: every /attention item parses against AttentionItemSchema', bad.length === 0, bad);
   check('decisions sort first: approval offers Approve/Reject', list[0]?.type === 'approval_needed'
     && JSON.stringify(byType('approval_needed').actions.map((a: any) => a.id)) === '["approve","reject"]', list.map((i) => i.type));
   check('Google reauth item says so and offers Reconnect', byType('connection_problem')?.source === 'Google'
@@ -76,6 +91,7 @@ try {
 
   // ---- drill-in + actions ----
   const detail = await call('GET', `/attention/approval_needed/${act.id}`, OWNER);
+  check('contract: drill-in parses against AttentionDetailSchema', AttentionDetailSchema.safeParse(detail.body).success, detail.body);
   check('drill-in returns label/value facts', detail.status === 200 && detail.body.facts.some((f: any) => f.label === 'Action' && f.value === 'CRM note')
     && detail.body.facts.some((f: any) => f.label === 'Note' && f.value === 'hello'), detail.body);
 

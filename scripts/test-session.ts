@@ -1,7 +1,7 @@
 // Phone-app session handling (public/session.js): the auth rule "an API 401 never signs out directly".
 // Pure Node, no browser: a fake Supabase client + fake API server.
 // Usage: npx tsx scripts/test-session.ts
-import { AuthError, createSessionApi } from '../public/session.js';
+import { AuthError, createSessionApi, OutdatedError } from '../public/session.js';
 
 const failures: string[] = [];
 function check(name: string, cond: boolean, detail?: unknown) {
@@ -94,6 +94,22 @@ const fakeFetch = async (path: string, init: { headers: Record<string, string> }
   release();
   await call;
   check('API calls wait for the build check before going out', heldBack && order.join() === 'checked,fetch', order);
+}
+
+// 7. Compatibility contract: the client's level goes out on every call; a 426 reloads, never signs out.
+{
+  const sb = fakeSupabase({ token: 'fresh-0', refreshOk: true });
+  const sent: (string | undefined)[] = [];
+  let outdated = 0;
+  const { api } = createSessionApi({ sb, clientCompat: 3, onOutdated: async () => { outdated++; },
+    fetchImpl: (async (_p: string, i: { headers: Record<string, string> }) => {
+      sent.push(i.headers['x-client-compat']);
+      return new Response(JSON.stringify({ error: 'client_outdated', minCompat: 4 }), { status: 426 });
+    }) as never });
+  const r = await api('/attention').then(() => null, (e) => e);
+  check('every call carries x-client-compat', JSON.stringify(sent) === '["3"]', sent);
+  check('426 → onOutdated (reload) + OutdatedError; no refresh, no sign-out', r instanceof OutdatedError && outdated === 1
+    && sb.state.refreshes === 0 && sb.state.signOuts.length === 0, { r: String(r), outdated, state: sb.state });
 }
 
 console.log(failures.length ? `\nFAILED: ${failures.length}` : '\nall session checks passed');

@@ -105,7 +105,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module">
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
-import { AuthError, createSessionApi } from '/app/session.js';
+import { AuthError, OutdatedError, createSessionApi } from '/app/session.js';
 
 const $view = document.getElementById('view');
 const cfg = await (await fetch('/app/config')).json();
@@ -173,8 +173,22 @@ function checkBuild() {
   })();
   return buildGate;
 }
+// Compatibility contract (src/compat.ts): sent on every call. A server this code is too old for answers 426
+// and we reload. Bump ONLY for a breaking API change, together with MIN_CLIENT_COMPAT on the server.
+// Tolerant reader: new item types, actions and fields must not break this page (unknown actions still
+// POST generically; missing lists render empty).
+const CLIENT_COMPAT = 1;
+async function reloadForCompat() {
+  // Once: if the freshly loaded page is refused too, stop and say so rather than reload forever.
+  let last = 0;
+  try { last = Number(sessionStorage.getItem('compatReloadAt')) || 0; } catch { /* storage blocked */ }
+  if (Date.now() - last < 60_000) return;
+  try { sessionStorage.setItem('compatReloadAt', String(Date.now())); } catch { /* storage blocked */ }
+  location.reload(); await new Promise(() => {}); // hold every call until the reload
+}
 // Auth rule: a 401 never signs out directly; see /app/session.js.
-const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; }, beforeRequest: () => (Date.now() - lastBuildCheck > BUILD_CHECK_MAX_AGE_MS ? checkBuild() : buildGate) });
+const { api, signOutHere } = createSessionApi({ sb, onSession: (s) => { session = s; }, clientCompat: CLIENT_COMPAT, onOutdated: reloadForCompat,
+  beforeRequest: () => (Date.now() - lastBuildCheck > BUILD_CHECK_MAX_AGE_MS ? checkBuild() : buildGate) });
 
 // ---------- screens ----------
 function loginScreen(note) {
@@ -215,7 +229,7 @@ function codeScreen(address) {
 }
 
 function actionButtons(item, after) {
-  return item.actions.map((a) => h('button', {
+  return (item.actions ?? []).map((a) => h('button', {
     class: a.style ?? '',
     onclick: async (e) => {
       e.stopPropagation();
@@ -263,7 +277,7 @@ async function itemDetail(type, ref) {
     h('h2', {}, item.title),
     item.summary ? h('p', { class: 'summary' }, item.summary) : null,
     h('div', { class: 'actions' }, actionButtons(item, () => go('#/'))),
-    h('div', { class: 'card', style: 'margin-top:16px' }, h('dl', {}, facts.flatMap((f) => [h('dt', {}, f.label), h('dd', {}, f.value)]))),
+    h('div', { class: 'card', style: 'margin-top:16px' }, h('dl', {}, (facts ?? []).flatMap((f) => [h('dt', {}, f.label), h('dd', {}, f.value)]))),
   );
 }
 
@@ -496,6 +510,7 @@ function setBadge(n) { const b = document.getElementById('badge'); b.textContent
 function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
 function handleErr(err) {
   if (err instanceof AuthError) return session ? loginScreen(err.message) : loginScreen();
+  if (err instanceof OutdatedError) return toast(err.message);
   console.error(err); toast('Something went wrong. Pull to retry.');
 }
 
