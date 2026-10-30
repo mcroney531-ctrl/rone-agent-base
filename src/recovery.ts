@@ -9,9 +9,13 @@
 //   - resumes the dead executor's PENDING workflows with the public DBOS.resumeWorkflows() API,
 //     which re-enqueues them under the SAME workflow ID and keeps their checkpoints
 //   - fences: an executor that finds itself reaped exits instead of racing its own replacement
+//   - lease: an executor that cannot renew its heartbeat for most of DEAD_AFTER_MS exits before a peer
+//     could reap it. Otherwise a live-but-unheard executor keeps running and can even dequeue the very
+//     workflows its replacement just resumed, so two executions of one workflow share a process
+//     (found by failure-suite t9 / H1).
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { pool } from './db.js';
-import { DEAD_AFTER_MS, EXECUTOR_ID, HEARTBEAT_MS, PROCESS_META } from './config.js';
+import { DEAD_AFTER_MS, EXECUTOR_ID, HEARTBEAT_MS, LEASE_FRACTION, PROCESS_META } from './config.js';
 
 export async function registerExecutor(): Promise<void> {
   const m = PROCESS_META;
@@ -23,7 +27,20 @@ export async function registerExecutor(): Promise<void> {
   if (rowCount !== 1) throw new Error(`executor ID ${EXECUTOR_ID} was already used by another process; IDs must be unique per process`);
 }
 
+// Exit before a peer could consider us dead: peers reap after DEAD_AFTER_MS of silence, so stop at 60% of it.
+const LEASE_MS = Math.floor(DEAD_AFTER_MS * LEASE_FRACTION);
+let lastRenewedAt = Date.now();
+
+function checkLease(): void {
+  const silentMs = Date.now() - lastRenewedAt;
+  if (LEASE_MS > 0 && silentMs > LEASE_MS) {
+    console.error(`[recovery] FENCED: heartbeat not renewed for ${silentMs}ms (lease ${LEASE_MS}ms); exiting before a peer takes over our work`);
+    process.exit(70);
+  }
+}
+
 async function heartbeat(): Promise<void> {
+  checkLease(); // first, before anything else gets to run after a stall
   const { rows } = await pool.query(
     `update ops.executors set last_seen_at = now() where executor_id = $1 returning reaped_at, reaped_by`,
     [EXECUTOR_ID],
@@ -32,6 +49,7 @@ async function heartbeat(): Promise<void> {
     console.error(`[recovery] FENCED: this executor was reaped by ${rows[0].reaped_by}; exiting so work is not run twice`);
     process.exit(70);
   }
+  if (rows[0]) lastRenewedAt = Date.now();
 }
 
 export async function sweepDeadExecutors(): Promise<{ reaped: string[]; resumed: number }> {
@@ -61,7 +79,8 @@ export async function sweepDeadExecutors(): Promise<{ reaped: string[]; resumed:
 }
 
 export function startLivenessLoops(): () => void {
-  const hb = setInterval(() => heartbeat().catch((e) => console.error('[recovery] heartbeat failed:', e.message)), HEARTBEAT_MS);
+  lastRenewedAt = Date.now();
+  const hb = setInterval(() => heartbeat().catch((e) => { console.error('[recovery] heartbeat failed:', e.message); checkLease(); }), HEARTBEAT_MS);
   const sweep = setInterval(
     () => sweepDeadExecutors().catch((e) => console.error('[recovery] sweep failed:', e.message)),
     Math.max(HEARTBEAT_MS * 2, 5000),

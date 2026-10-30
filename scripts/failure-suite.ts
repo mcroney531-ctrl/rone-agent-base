@@ -1,5 +1,5 @@
 // Failure suite, handoff items 1-8 (t8 shells out to scripts/upgrade-test.sh).
-// Usage: npx tsx scripts/failure-suite.ts [t1 t1b t2 t3 t3b t4a t4b t4c t4d t5 t6 t7 t8]
+// Usage: npx tsx scripts/failure-suite.ts [t1 t1b t2 t3 t3b t4a t4b t4c t4d t5 t6 t7 t8 t9 t9b t9c]
 // Needs: local Postgres (PG_ADMIN_URL) and `npx tsx src/externals.ts` running.
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -530,7 +530,112 @@ async function t8(): Promise<Result> {
 }
 
 // ---------------------------------------------------------------------------------------------
-const TESTS: Record<string, () => Promise<Result>> = { t1, t1b, t2, t3, t3b, t4a, t4b, t4c, t4d, t5, t6, t7, t8 };
+// H1. Zombie executor: a process that is alive but unheard. Two shapes:
+//   t9  'partition' — only its heartbeat writes fail; the process and its workflow keep running.
+//   t9b 'stall'     — the whole process freezes (SIGSTOP) past DEAD_AFTER_MS, a peer reaps it and resumes the
+//                     workflow, then the zombie wakes up (SIGCONT) mid-way through the peer's run.
+// Pass = one outcome owned by the peer, no duplicated effects, the zombie fences itself out (exit 70) and
+// never writes over the peer, and health/attention never claim a failure at any sampled moment.
+async function zombie(mode: 'partition' | 'stall' | 'stall-no-lease'): Promise<Result> {
+  const id = { partition: 't9', stall: 't9b', 'stall-no-lease': 't9c' }[mode];
+  const { url, db } = await freshDb(`spike_${id}`);
+  const mock = logFile(`${id}.mock`);
+  const env = { MOCK_DELAY_MS: '2500', MOCK_CALL_LOG: mock };
+  // t9c: no lease, and a slow heartbeat so the woken zombie reaches its next checkpoint before its next heartbeat:
+  // only DBOS's checkpoint-ownership fence and our catch blocks stand in its way.
+  const z = await startWorker({ id: `${id}-zombie`, port: 7810, dbUrl: url, env: mode === 'stall-no-lease' ? { ...env, LEASE_FRACTION: '0', HEARTBEAT_MS: '15000' } : env });
+  const wf = await trigger(z, 'zombie-1');
+  await waitFor('zombie in model turn 1', () => mockCalls(mock).some((c) => c.wf === wf && c.turn === 1));
+  let zombieExitedAt: number | undefined;
+  void z.exited.then(() => { zombieExitedAt = Date.now(); });
+  if (mode === 'partition') {
+    // Reject only the zombie's heartbeat (a write that moves last_seen_at); everything else still works.
+    await db.query(`
+      create or replace function ops.t9_partition() returns trigger language plpgsql as $$
+      begin
+        if old.executor_id = '${id}-zombie' and new.last_seen_at is distinct from old.last_seen_at then
+          raise exception 't9: heartbeat partitioned';
+        end if;
+        return new;
+      end $$;
+      create trigger t9_partition before update on ops.executors for each row execute function ops.t9_partition();`);
+  } else {
+    z.proc.kill('SIGSTOP');
+  }
+  const silencedAt = Date.now();
+  const b = await startWorker({ id: `${id}-b`, port: 7811, dbUrl: url, env });
+
+  // Sample what the owner would see on the phone the whole way through.
+  const samples: { t: number; health: string; lastOutcome: string | null; items: string[] }[] = [];
+  let sampling = true;
+  const sampler = (async () => {
+    while (sampling) {
+      const h = await one(db, `select health_state, last_outcome from ops.agent_health where agent_id = $1`, [AGENT]);
+      const items = (await all(db, `select kind, ref from ops.attention_queue where kind in ('run_failed', 'run_stuck', 'executor_unreaped', 'action_failed')`))
+        .map((r) => `${r.kind}:${r.ref}`);
+      samples.push({ t: Date.now() - silencedAt, health: h?.health_state, lastOutcome: h?.last_outcome ?? null, items });
+      await sleep(400);
+    }
+  })();
+
+  await waitFor('zombie reaped', async () => (await one(db, `select reaped_by from ops.executors where executor_id = $1`, [`${id}-zombie`])).reaped_by === `${id}-b`, 30_000);
+  const reapedAt = Date.now();
+  if (mode !== 'partition') {
+    await waitFor('peer running the resumed workflow', () => mockCalls(mock).some((c) => c.wf === wf && c.pid === String(b.proc.pid)), 20_000);
+    z.proc.kill('SIGCONT'); // wake the zombie while the peer is mid-run
+  }
+  const exitCode = await Promise.race([z.exited, sleep(25_000).then(() => 'still running')]);
+  await waitFor('run succeeded', async () => (await runState(db, wf)) === 'succeeded', 60_000);
+  await sleep(3000);
+  sampling = false; await sampler;
+
+  const v = await one(db, `select run_state, executor_id, recovery_attempts from ops.v_runs where workflow_id = $1`, [wf]);
+  const actions = await actionsFor(db, wf);
+  const runs = await one(db, `select count(*)::int n, max(outcome) outcome, max(error_message) err from ops.runs where workflow_id = $1`, [wf]);
+  const calls = mockCalls(mock).filter((c) => c.wf === wf);
+  const zPid = String(z.proc.pid), bPid = String(b.proc.pid);
+  const byPid = { zombie: calls.filter((c) => c.pid === zPid).map((c) => c.turn), peer: calls.filter((c) => c.pid === bPid).map((c) => c.turn) };
+  const zombieLog = fs.readFileSync(z.log, 'utf8').split('\n');
+  const fenceLine = zombieLog.find((l) => l.includes('FENCED')) ?? null;
+  const conflictLines = zombieLog.filter((l) => /no longer owned/.test(l)).length;
+  const final = samples.at(-1)!;
+  const lied = samples.filter((s) => s.lastOutcome === 'failed' || s.health === 'failing' || s.items.some((i) => i.startsWith('run_failed') || i.startsWith('action_failed')));
+  const fencedBeforeReap = mode === 'partition' ? zombieExitedAt !== undefined && zombieExitedAt < reapedAt : true;
+  const ok = v.run_state === 'succeeded' && v.executor_id === `${id}-b` && runs.n === 1 && runs.outcome === 'succeeded'
+    && actions.length === 3 && new Set(actions.map((a) => a.idempotency_key)).size === 3
+    && exitCode === 70 && fencedBeforeReap && (mode !== 'stall-no-lease' || conflictLines > 0)
+    && lied.length === 0 && final.health === 'healthy' && final.items.length === 0;
+  await b.kill('SIGTERM');
+  return {
+    id, title: {
+      partition: 'H1: zombie executor, heartbeat partitioned while the process keeps running',
+      stall: 'H1: zombie executor, process frozen past the reap, then wakes mid-way through the peer\'s run',
+      'stall-no-lease': 'H1: same stall with the lease disabled: DBOS rejects the zombie\'s checkpoint and it stands down',
+    }[mode],
+    classification: ok ? 'PASS WITH ADAPTER' : 'FAIL',
+    metrics: {
+      reapMsAfterSilence: reapedAt - silencedAt, zombieExitMsAfterSilence: zombieExitedAt ? zombieExitedAt - silencedAt : null,
+      fencedBeforeReap, zombieExit: exitCode, fenceLine, conflictLines,
+      finalState: v, runLedger: runs, actions: actions.length, distinctKeys: new Set(actions.map((a) => a.idempotency_key)).size,
+      modelTurnsByProcess: byPid, healthSamples: samples.length, healthTimeline: [...new Set(samples.map((s) => s.health))],
+      misleadingSamples: lied.slice(0, 5), final,
+    },
+    notes: mode === 'stall-no-lease' ? [
+      'Defence in depth: with no lease, the woken zombie finishes its in-flight model call and tries to checkpoint it. DBOS rejects it (DBOSWorkflowConflictError: no longer owned), our catch rethrows it untouched (no failed run recorded), DBOS parks that execution to adopt the owner\'s outcome, and the zombie\'s next heartbeat sees it was reaped and exits 70.',
+    ] : mode === 'partition' ? [
+      'Partition = a test trigger that rejects only the zombie heartbeat write; its process, workflow and queue polling keep running.',
+      'Before the lease, the zombie kept running past its reap and dequeued the workflow its replacement had just resumed: two executions of one workflow in one process; the AI SDK durable-call guard failed the legitimate one, and our catch block recorded the run as failed. Now the zombie exits once it has been silent for 60% of DEAD_AFTER_MS, before any peer may reap it.',
+    ] : [
+      'The frozen process cannot dequeue, so the peer owns the resumed workflow. On waking, the zombie checks its lease before anything else and exits (code 70); any checkpoint it attempts first is rejected by DBOS (workflow no longer owned), and our catch blocks now rethrow that untouched instead of recording a failed run.',
+    ],
+  };
+}
+const t9 = () => zombie('partition');
+const t9b = () => zombie('stall');
+const t9c = () => zombie('stall-no-lease');
+
+// ---------------------------------------------------------------------------------------------
+const TESTS: Record<string, () => Promise<Result>> = { t1, t1b, t2, t3, t3b, t4a, t4b, t4c, t4d, t5, t6, t7, t8, t9, t9b, t9c };
 const selected = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TESTS);
 const resultsPath = path.resolve('docs/spike-results.json');
 const results: Record<string, Result> = fs.existsSync(resultsPath) ? JSON.parse(fs.readFileSync(resultsPath, 'utf8')) : {};

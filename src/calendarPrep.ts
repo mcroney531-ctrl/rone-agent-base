@@ -9,7 +9,7 @@ import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { pool } from './db.js';
 import { agentModel } from './model.js';
-import { classify, OpsError } from './errors.js';
+import { classify, dbosControlError, OpsError } from './errors.js';
 import {
   deleteEvent, ensureAgentOpsCalendar, getEvent, insertEventOnce, listEvents, upsertEvent, type CalendarEvent,
 } from './connections/google.js';
@@ -346,6 +346,8 @@ export async function calendarPrepRun(agent: AgentRow, trigger: Trigger, workflo
       name: 'writeMirror', retriesAllowed: true, maxAttempts: 3, intervalSeconds: 2, backoffRate: 2,
     });
   } catch (e) {
+    const control = dbosControlError(e);
+    if (control) throw control;
     const { errorClass, message } = classify(e);
     mirror = { status: 'failed', eventId: null, calendarId: null, error: `${errorClass}: ${message}` };
   }
@@ -500,6 +502,8 @@ async function deeperPrepBody(briefId: string, eventId: string) {
     await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', {}), { name: 'recordRunEnd' });
     return { ok: true };
   } catch (err) {
+    const control = dbosControlError(err);
+    if (control) throw control;
     const { errorClass, message } = classify(err);
     await DBOS.runStep(() => recordRunEnd(workflowId, 'failed', { errorClass, errorMessage: message }), { name: 'recordRunFailed' });
     throw err;

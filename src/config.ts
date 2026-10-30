@@ -77,4 +77,7 @@ export const FAKE_PROVIDER_URL = process.env.FAKE_PROVIDER_URL ?? 'http://127.0.
 
 export const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS ?? 5000);
 export const DEAD_AFTER_MS = Number(process.env.DEAD_AFTER_MS ?? 30000);
+// Self-fence after this fraction of DEAD_AFTER_MS without a renewed heartbeat. 0 disables (failure suite only,
+// to exercise DBOS's checkpoint-ownership fence on its own).
+export const LEASE_FRACTION = Number(process.env.LEASE_FRACTION ?? 0.6);
 export const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? 20000);
