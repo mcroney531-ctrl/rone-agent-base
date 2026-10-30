@@ -134,7 +134,7 @@ function mockTriage(prompt: string) {
       return {
         ref: e.ref, category,
         summary: `${e.from.split('<')[0].trim() || 'Someone'}: ${e.subject}`.slice(0, 120),
-        draft: category === 'needs_reply' ? `Thanks for reaching out. I'll take a look and get back to you by [day].` : null,
+        draft: category === 'needs_reply' ? `Thanks for reaching out. Yes, that works for me at [time].` : null,
       };
     }),
   };
