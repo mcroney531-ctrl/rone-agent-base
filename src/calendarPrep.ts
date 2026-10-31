@@ -495,7 +495,7 @@ export type DeeperInput = {
 
 /** Every citable source, by id → a short human label. 'ev' is the calendar invite itself. */
 export function sourceIndex(c: RetrievedContext | null): Map<string, { label: string; ownerAuthored?: boolean }> {
-  const m = new Map<string, { label: string; ownerAuthored?: boolean }>([['ev', { label: 'Invite' }]]);
+  const m = new Map<string, { label: string; ownerAuthored?: boolean }>([['ev', { label: 'Invite' }], ['fp', { label: 'First-pass brief' }]]);
   const d = (iso: string) => new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   for (const x of c?.meetingHistory ?? []) m.set(x.id, { label: `Met ${d(x.date)}` });
   for (const t of c?.emailThreads ?? []) {
@@ -534,7 +534,7 @@ export function renderDeeper(d: Deeper, idx: ReturnType<typeof sourceIndex>): st
     if (!d[k].length) continue;
     parts.push(`## ${SECTION_TITLES[k]}`);
     for (const c of d[k]) {
-      const cite = c.sources.filter((x) => x !== 'ev').map((x) => idx.get(x)!.label); // the invite is implied
+      const cite = c.sources.filter((x) => x !== 'ev' && x !== 'fp').map((x) => idx.get(x)!.label); // the invite and tonight's brief are implied
       const text = c.kind === 'inference' ? `Likely: ${c.text}` : c.text;
       parts.push(`- ${text}${cite.length && c.kind !== 'suggestion' ? ` _(${[...new Set(cite)].join('; ')})_` : ''}`);
     }
@@ -544,6 +544,7 @@ export function renderDeeper(d: Deeper, idx: ReturnType<typeof sourceIndex>): st
 
 export function deeperPrompt(i: DeeperInput): string {
   const sources = {
+    fp: i.firstPass,
     ev: { title: i.title, when: `${i.when} on ${i.date} (${i.tz})`, attendees: i.attendees, organizer: i.organizer, location: i.location, video: i.video, description: i.description.slice(0, 4000) },
     meetingHistory: i.context?.meetingHistory ?? [],
     emailThreads: i.context?.emailThreads ?? [],
@@ -553,7 +554,7 @@ export function deeperPrompt(i: DeeperInput): string {
   return [
     '<deeper>Prepare me properly for this one meeting. Return claims in four sections: context, outcome (what I want out of it),',
     'questions (to ask), risks (decisions/risks). At most 180 words in total; short claims; do not repeat the first-pass brief.',
-    'Each claim has a kind and the ids of the sources it rests on (ev = the invite; m1… past meetings; t1.2 = a message in',
+    'Each claim has a kind and the ids of the sources it rests on (ev = the invite; fp = the first-pass brief; m1… past meetings; t1.2 = a message in',
     'thread t1; t1 = the thread; b1… earlier briefs):',
     '- fact: something a source states. request: someone asked someone for something (by = owner if the OWNER asked, other',
     '  if someone asked the owner or a third party). commitment: someone promised something (by = owner ONLY if a message',
@@ -568,7 +569,6 @@ export function deeperPrompt(i: DeeperInput): string {
     `Video call: ${i.video}.`,
     `Prep hold: ${i.hold}.`,
     unavailable.length ? `Not available this time: ${unavailable.join(', ')} (say so only if it matters).` : '',
-    `First-pass brief said: ${i.firstPass.why} Prep: ${i.firstPass.prep.join(' | ')}`,
     `<sources>${JSON.stringify(sources)}</sources></deeper>`,
   ].filter(Boolean).join('\n');
 }
