@@ -74,6 +74,19 @@ export async function inboxAddedSince(connectionId: string, startHistoryId: stri
   return { ids: [...ids], historyId };
 }
 
+/**
+ * Read-only retrieval (Calendar Prep): IDs of recent mail exchanged with any of these addresses, newest first.
+ * Matching is by email ADDRESS only (from/to/cc), never by display name, so a namesake can't pull in the wrong thread.
+ */
+export async function recentMailWith(connectionId: string, addresses: string[], days: number, cap = 12): Promise<{ id: string; threadId: string }[]> {
+  const addrs = [...new Set(addresses.map((a) => a.trim().toLowerCase()).filter((a) => /^[^\s@{}()"]+@[^\s@{}()"]+$/.test(a)))];
+  if (!addrs.length) return [];
+  const any = addrs.flatMap((a) => [`from:${a}`, `to:${a}`, `cc:${a}`]).join(' ');
+  const q = new URLSearchParams({ q: `newer_than:${days}d {${any}} -in:spam -in:trash -in:drafts`, maxResults: String(Math.min(cap, 50)) });
+  const r = await gmail<{ messages?: { id: string; threadId: string }[] }>(connectionId, 'GET', `/messages?${q}`);
+  return (r.messages ?? []).slice(0, cap);
+}
+
 export type MailMessage = {
   id: string; threadId: string; labelIds: string[]; receivedAt: string;
   from: string; fromName: string | null; fromAddr: string; replyTo: string | null; to: string; cc: string; subject: string;

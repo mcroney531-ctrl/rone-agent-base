@@ -67,6 +67,7 @@ const env = {
   GOOGLE_REDIRECT_URI: `http://127.0.0.1:${PORT}/oauth/google/callback`,
   GOOGLE_AUTH_URL: `${EXTERNALS}/google/auth`, GOOGLE_TOKEN_URL: `${EXTERNALS}/google/token`,
   GOOGLE_USERINFO_URL: `${EXTERNALS}/google/userinfo`, GOOGLE_CALENDAR_BASE: `${EXTERNALS}/google/calendar/v3`,
+  GMAIL_BASE: `${EXTERNALS}/google/gmail/v1/users/me`,
   APP_URL: 'https://ops.example',
 };
 await fetch(`${EXTERNALS}/google/admin/reset`, { method: 'POST' });
@@ -266,6 +267,49 @@ try {
   const run4 = await runPrep('r4');
   const b6 = (await w.http('GET', `/briefs/${DATE}`)).body;
   check('stale calendar id → re-adopts Agent Ops and writes the mirror again', run4.outcome === 'succeeded' && b6.mirror_status === 'written' && b6.items.length === 2, b6);
+
+  // ---- retrieval: what we already know about the meeting's people (read-only, sourced, degrades per source) ----
+  {
+    const daysAgo = (d: number, h = 15) => new Date(Date.now() - d * 86_400_000 + h * 3_600_000 - 12 * 3_600_000).toISOString();
+    const past = (id: string, summary: string, d: number, who: string) =>
+      ({ id, summary, status: 'confirmed', start: { dateTime: daysAgo(d) }, end: { dateTime: daysAgo(d, 16) }, attendees: [me, { email: who, displayName: 'Jane Doe' }] });
+    await fetch(`${EXTERNALS}/google/admin/events`, { method: 'POST', body: JSON.stringify([...EVENTS,
+      past('p1', 'Pricing kickoff', 20, 'jane@acme.com'), past('p2', 'Pricing check-in', 6, 'jane@acme.com'),
+      past('p3', 'Coffee with the other Jane', 3, 'jane@other.org')]) }); // same display name, different address
+    await fetch(`${EXTERNALS}/google/admin/gmail/messages`, { method: 'POST', body: JSON.stringify([
+      { id: 'jm1', threadId: 'jt1', from: 'Jane Doe <jane@acme.com>', to: 'rone@example.com', subject: 'Revised pricing', body: 'Can you send revised pricing by Friday? Legal needs it before renewal.', ageMinutes: 2 * 24 * 60 },
+      { id: 'om1', threadId: 'ot1', from: 'Jane Doe <jane@other.org>', to: 'rone@example.com', subject: 'Coffee?', body: 'Coffee next week?', ageMinutes: 60 },
+      { id: 'old1', threadId: 'oldt', from: 'Jane Doe <jane@acme.com>', to: 'rone@example.com', subject: 'Old thread', body: 'Ancient history?', ageMinutes: 45 * 24 * 60 },
+    ]) });
+
+    const r = await runPrep('retrieval-1');
+    const wf = (await one(db, `select workflow_id from ops.runs where agent_id = 'calendar-prep' and outcome = 'succeeded' order by started_at desc limit 1`)).workflow_id;
+    const step = await one(db, `select output from dbos.operation_outputs where workflow_uuid = $1 and function_name = 'retrieveSignals'`, [wf]);
+    const sig = step ? JSON.parse(step.output).json?.ext1 ?? JSON.parse(step.output).ext1 : null;
+    check('nightly ranking gets signals: met twice (by address), one live thread awaiting the owner', r.outcome === 'succeeded' && sig?.metBefore === 2
+      && sig?.threads?.length === 1 && sig.threads[0].subject === 'Revised pricing' && sig.threads[0].awaitingOwner === true, { r, sig, raw: step?.output?.slice(0, 400) });
+
+    const b = (await w.http('GET', `/briefs/${DATE}`)).body;
+    await w.http('POST', `/briefs/${b.id}/items/ext1/deeper`);
+    await waitFor('deeper ext1', async () => Boolean((await one(db, `select content from ops.brief_deeper where brief_id = $1 and event_id = 'ext1'`, [b.id]))?.content), 20_000);
+    const content = (await one(db, `select content from ops.brief_deeper where brief_id = $1 and event_id = 'ext1'`, [b.id])).content as string;
+    check('deeper prep cites its sources: the email (dated, by name) and the last meeting', /Jane Doe wrote: Can you send revised pricing/.test(content)
+      && /_\(Email \w+ \d+, Jane Doe\)_/.test(content) && /Met before: Pricing check-in _\(Met \w+ \d+\)_/.test(content), content);
+    check('the namesake at another address and mail older than 30 days are not pulled in', !/other\.org|Coffee|Ancient/.test(content), content);
+    const g = await gstate();
+    check('retrieval wrote nothing to Gmail or the primary calendar', g.primaryWrites === 0
+      && (await (await fetch(`${EXTERNALS}/google/admin/gmail/state`)).json()).forbidden.length === 0);
+
+    // Degrade, don't block: without Gmail access the email source is skipped; the run and the rest still work.
+    await db.query(`update ops.connections set scopes = array_remove(scopes, 'https://www.googleapis.com/auth/gmail.modify') where id = 'google:primary'`);
+    const r2 = await runPrep('retrieval-no-gmail');
+    const wf2 = (await one(db, `select workflow_id from ops.runs where agent_id = 'calendar-prep' and trigger_type <> 'deeper_prep' order by started_at desc limit 1`)).workflow_id;
+    const step2 = await one(db, `select output from dbos.operation_outputs where workflow_uuid = $1 and function_name = 'retrieveSignals'`, [wf2]);
+    const sig2 = step2 ? (JSON.parse(step2.output).json ?? JSON.parse(step2.output)).ext1 : null;
+    check('no Gmail access → run still succeeds; meeting history kept, email skipped', r2.outcome === 'succeeded' && sig2?.metBefore === 2 && sig2?.threads?.length === 0, { r2, sig2 });
+    await db.query(`update ops.connections set scopes = array_append(scopes, 'https://www.googleapis.com/auth/gmail.modify') where id = 'google:primary'`);
+  }
+
 } finally {
   await killAllWorkers();
   await db.end();

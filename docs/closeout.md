@@ -33,6 +33,20 @@ Chosen to stress what Calendar Prep doesn't: frequent runs (every 20 min), a new
 - **Shared connection, per-agent scopes:** `agent_connections.scopes`. An active Google connection without Gmail blocks only Inbox Triage (one Reconnect item naming it), Calendar Prep keeps running. Blocked agents now skip scheduled occurrences (`last_skip_reason = 'blocked'`) instead of failing every tick; manual runs still fail loudly.
 - **Genericity (the #1a test):** `test-inbox-triage` runs both producers and checks one Needs You list with one item shape, one health model (pause one, the other stays healthy) and pause/409 working unchanged for the new producer.
 
+### Calendar Prep retrieval (V1)
+
+Calendar Prep used to see only the invite. Now it also knows what is already known about the meeting's people, from grants the owner already gave (no new scopes):
+
+- **Sources** (`src/retrieval.ts`): past meetings sharing an attendee (primary calendar, 90 days; all counted, latest 5 kept), email threads with the attendees (Gmail, 30 days, top 3 threads × 2 messages × ~600 chars), earlier briefs for the same series or title (60 days, with "not useful" feedback). Structured, with a source id on everything (`m1`, `t1.2`, `b1`, `ev`).
+- **Split:** the nightly ranking gets *signals* (met-before count and recency, thread subject, whether someone is waiting on the owner, one 160-char excerpt). It may change what is picked; it appears in "why" only when it materially changes why the meeting matters. "Prepare more" gets the full sources.
+- **Claims are checked, not trusted.** Deeper prep returns claims with a kind (fact, request, commitment, inference, gap = what no source shows, suggestion) and source ids. Code drops any fact/request/commitment without a real source, and any "the owner committed" that doesn't cite an email the owner wrote (a request made of the owner is never the owner's commitment). Inferences render as "Likely: …"; citations render as dated labels ("Email Oct 29, Jane Doe", "Met Oct 14").
+- **Identity by address only.** People are matched by email address, never display name: a namesake at another address is never pulled in.
+- **Degrade, never block.** Each source fails on its own (recorded, skipped). Gmail is optional for Calendar Prep: without the scope the email source is `no_access`; its required scope stays Calendar. With every source gone, deeper prep still works from the invite.
+- **Read-only, bounded, untrusted.** Calendar Prep uses only Gmail's read functions (`recentMailWith`, `getMessage`); email text is data, never instructions. Nothing retrieved is stored beyond the rendered brief text (and DBOS's own step checkpoints, as for Inbox Triage's fetched mail).
+- **Durability:** retrieval is its own checkpointed step in both the nightly run and deeper prep, behind `DBOS.patch('calendar-prep-retrieval')` / `DBOS.patch('deeper-prep-retrieval')`.
+- **Proof it's smarter:** the `calendar-prep` eval suite runs every scenario as an A/B (with / without retrieval) on the same synthetic day; critical: claims sourced, no owner commitment from a request, injection not obeyed, ≤200 words.
+- **Deferred:** linked Google Docs (needs `drive.readonly`, broad). Revisit only if email and meeting history prove insufficient.
+
 ### Eval harness (base tooling)
 
 Agents now run correctly; the next failure mode is a correct run with a dumb judgment. `src/eval/` scores an agent's judgment layer (real prompt, schema, batch size and model, no provider side effects) against a versioned corpus with dev/holdout splits and acceptable-answer sets. Critical invariants BLOCK (injection obeyed, sender deadline adopted as a commitment, unsupported facts in a draft, no-reply as needs_reply, >1 placeholder, a scenario's harmful answer); accuracy, per-category precision/recall, the confusion matrix and draft quality REPORT. Every run records prompt hash, model + config, schema, corpus, evaluator version and commit. Runs on its own Railway service (`eval`) with the worker's secrets by reference. Inbox Triage corpus v1: 32 dev + 10 holdout. Details: `docs/evals.md`.

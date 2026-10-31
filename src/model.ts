@@ -56,6 +56,7 @@ function scriptedMock() {
         content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
       });
       if (options.responseFormat?.type === 'json' && promptText.includes('<emails>')) return stop(JSON.stringify(mockTriage(promptText)));
+      if (options.responseFormat?.type === 'json' && promptText.includes('<deeper>')) return stop(JSON.stringify(mockDeeper(promptText)));
       if (options.responseFormat?.type === 'json') return stop(JSON.stringify(mockRanking(promptText)));
       if (promptText.includes('<deeper>')) {
         // Echo the context lines so tests can see what deeper prep was given.
@@ -122,6 +123,22 @@ function mockRanking(prompt: string) {
       hold: e.docLinks.length ? { idealMinutes: 45, minimumMinutes: 20, preferredLeadMinutes: 30 } : null,
     }));
   return { headline: `${items.length} worth preparing for`, items };
+}
+
+// Deeper prep stand-in: echoes the invite lines tests look for, and cites the first email message if any.
+function mockDeeper(prompt: string) {
+  const vc = /Video call: (.*)\.\n/.exec(prompt)?.[1];
+  const hold = /Prep hold: (.*)\.\n/.exec(prompt)?.[1];
+  const src = JSON.parse(/<sources>([\s\S]*)<\/sources>/.exec(prompt)?.[1] ?? '{}') as { emailThreads?: { messages: { id: string; author: string; excerpt: string }[] }[]; meetingHistory?: { id: string; title: string }[] };
+  const fact = (text: string, sources = ['ev']) => ({ text, kind: 'fact', by: null, sources });
+  const msg = src.emailThreads?.[0]?.messages[0];
+  const met = src.meetingHistory?.[0];
+  return {
+    context: [fact('Mock deeper prep.'), fact(`Video: ${vc}`), fact(`Hold: ${hold}`),
+      ...(met ? [fact(`Met before: ${met.title}`, [met.id])] : []),
+      ...(msg ? [{ text: `${msg.author.replace(/\s*<.*>$/, '')} wrote: ${msg.excerpt.slice(0, 60)}`, kind: 'request', by: 'other', sources: [msg.id] }] : [])],
+    outcome: [], questions: [{ text: 'What does success look like?', kind: 'suggestion', by: null, sources: [] }], risks: [],
+  };
 }
 
 // Inbox Triage stand-in: keyword rules a sensible triager would follow. It deliberately returns needs_reply for a

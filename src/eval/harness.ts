@@ -17,6 +17,7 @@ export type Check = { id: string; critical: boolean; pass: boolean; detail?: str
 export type ScenarioResult = {
   id: string;
   split: Split;
+  group?: string;                                             // e.g. an A/B arm ('with' / 'without' retrieval)
   expected: { acceptable: string[]; [k: string]: unknown };  // acceptable[0] is the primary label (for recall/confusion)
   output: Record<string, unknown> | null;
   predicted: string | null;
@@ -46,6 +47,7 @@ export type Metrics = {
   n: number;
   accuracy: number;
   bySplit: Record<string, { n: number; accuracy: number }>;
+  byGroup: Record<string, { n: number; accuracy: number }>;
   byLabel: Record<string, { support: number; recall: number | null; predicted: number; precision: number | null }>;
   confusion: Record<string, Record<string, number>>;          // primary expected → predicted → count
   quality: { checks: number; passed: number; score: number | null; failures: Record<string, number> };
@@ -60,6 +62,11 @@ export function score(results: ScenarioResult[], labels: readonly string[]): Met
   for (const sp of new Set(results.map((r) => r.split))) {
     const rs = results.filter((r) => r.split === sp);
     bySplit[sp] = { n: rs.length, accuracy: ratio(rs.filter(ok).length, rs.length) ?? 0 };
+  }
+  const byGroup: Metrics['byGroup'] = {};
+  for (const g of new Set(results.map((r) => r.group).filter((g): g is string => Boolean(g)))) {
+    const rs = results.filter((r) => r.group === g);
+    byGroup[g] = { n: rs.length, accuracy: ratio(rs.filter(ok).length, rs.length) ?? 0 };
   }
   const byLabel: Metrics['byLabel'] = {};
   const confusion: Metrics['confusion'] = {};
@@ -81,7 +88,7 @@ export function score(results: ScenarioResult[], labels: readonly string[]): Met
   const failures: Record<string, number> = {};
   for (const c of quality.filter((q) => !q.pass)) failures[c.id] = (failures[c.id] ?? 0) + 1;
   return {
-    n: results.length, accuracy: ratio(results.filter(ok).length, results.length) ?? 0, bySplit, byLabel, confusion,
+    n: results.length, accuracy: ratio(results.filter(ok).length, results.length) ?? 0, bySplit, byGroup, byLabel, confusion,
     quality: { checks: quality.length, passed: quality.filter((q) => q.pass).length, score: ratio(quality.filter((q) => q.pass).length, quality.length), failures },
     critical: results.flatMap((r) => r.checks.filter((c) => c.critical && !c.pass).map((c) => ({ scenario: r.id, check: c.id, detail: c.detail }))),
   };
@@ -138,6 +145,7 @@ export function report(name: string, runId: number, p: Provenance, m: Metrics, b
     ...m.critical.map((c) => `  ✗ ${c.scenario}: ${c.check}${c.detail ? ` (${c.detail})` : ''}`),
     '',
     `REPORT accuracy ${pct(m.accuracy)}${delta(m.accuracy, b?.accuracy)}  ` + Object.entries(m.bySplit).map(([k, v]) => `${k} ${pct(v.accuracy)} of ${v.n}${delta(v.accuracy, b?.bySplit[k]?.accuracy)}`).join('  '),
+    ...(Object.keys(m.byGroup ?? {}).length ? ['  by arm: ' + Object.entries(m.byGroup).map(([k, v]) => `${k} ${pct(v.accuracy)} of ${v.n}${delta(v.accuracy, b?.byGroup?.[k]?.accuracy)}`).join('  ')] : []),
     '  label             support  recall      precision',
     ...Object.entries(m.byLabel).map(([l, v]) => `  ${l.padEnd(17)} ${String(v.support).padStart(7)}  ${pct(v.recall)}${delta(v.recall, b?.byLabel[l]?.recall).padEnd(6)}  ${pct(v.precision)}${delta(v.precision, b?.byLabel[l]?.precision)}`),
     '  confusion (expected → predicted):',

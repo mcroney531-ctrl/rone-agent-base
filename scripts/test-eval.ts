@@ -89,6 +89,16 @@ try {
   const devOnly = await runSuite(pool, inboxTriageSuite(pool), ['dev']);
   check('a dev-only run does not take an all-splits run as its baseline', devOnly.baseline === null && devOnly.metrics.n === dev, devOnly.baseline);
   console.log(`\n${r2.report}\n`);
+  // ---- Calendar Prep suite: an A/B of the same scenarios with and without retrieval ----
+  const { calendarPrepSuite, loadCorpus: loadCal } = await import('../src/eval/calendarPrep.js');
+  const cal = loadCal().corpus;
+  const cp = await runSuite(pool, calendarPrepSuite(pool), ['dev', 'holdout']);
+  check('calendar-prep: every scenario runs in both arms, reported per arm', cp.metrics.n === cal.scenarios.length * 2
+    && cp.metrics.byGroup.with?.n === cal.scenarios.length && cp.metrics.byGroup.without?.n === cal.scenarios.length && /by arm: with/.test(cp.report), cp.metrics.byGroup);
+  check('calendar-prep: retrieval context is what surfaces the email/history facts (with > without)',
+    cp.metrics.byGroup.with.accuracy > cp.metrics.byGroup.without.accuracy, cp.metrics.byGroup);
+  check('calendar-prep: the scripted model cites only real sources (no critical failures)', cp.status === 'passed', cp.metrics.critical);
+  console.log(`\n${cp.report}\n`);
 } finally {
   await pool.end();
   await db.end();

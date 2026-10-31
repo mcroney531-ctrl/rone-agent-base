@@ -310,8 +310,15 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
     let list = [...GM.messages.values()];
     const msgid = /rfc822msgid:(\S+)/.exec(q)?.[1];
     if (msgid) list = list.filter((m) => gmHeader(m, 'Message-ID') === msgid);
-    if (/in:drafts/.test(q)) list = list.filter((m) => m.labelIds.includes('DRAFT'));
+    if (/(^|\s)in:drafts/.test(q)) list = list.filter((m) => m.labelIds.includes('DRAFT'));
     if (/in:inbox/.test(q)) list = list.filter((m) => m.labelIds.includes('INBOX'));
+    // {from:a to:a cc:b …}: Gmail's OR group, matched on addresses in From/To/Cc.
+    const group = /\{([^}]*)\}/.exec(q)?.[1];
+    if (group) {
+      const want = [...group.matchAll(/(from|to|cc):(\S+)/g)].map((x) => ({ h: x[1], a: x[2].toLowerCase() }));
+      list = list.filter((m) => want.some((w) => (gmHeader(m, w.h) ?? '').toLowerCase().includes(w.a)));
+    }
+    if (/-in:drafts/.test(q)) list = list.filter((m) => !m.labelIds.includes('DRAFT'));
     const days = /newer_than:(\d+)d/.exec(q)?.[1];
     if (days) list = list.filter((m) => m.internalDate > Date.now() - Number(days) * 86_400_000);
     list.sort((a, b) => b.internalDate - a.internalDate);
