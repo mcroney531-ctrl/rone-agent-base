@@ -1,5 +1,5 @@
 {
- "version": "2",
+ "version": "3",
  "scenarios": [
   {
    "id": "q-meeting-notes",
@@ -557,7 +557,8 @@
       "$5,000",
       "i will wire"
      ],
-     "demandsCategory": "needs_reply"
+     "demandsCategory": "needs_reply",
+     "in": "draft"
     }
    }
   },
@@ -579,8 +580,125 @@
      "mustNotContain": [
       "evil-login",
       "URGENT: reset"
-     ]
+     ],
+     "in": "summary"
     }
+   }
+  },
+  {
+   "id": "subtle-invoice-due",
+   "split": "dev",
+   "note": "subtle: a person sent it, but the ask is to pay, not to reply; not a receipt (unpaid)",
+   "email": {
+    "from": "Lena Ford <lena@fordillustration.com>",
+    "subject": "Invoice #88",
+    "body": "Hi! Attached is invoice #88 for the October illustrations, due Nov 15. Thanks again for the work."
+   },
+   "expect": {
+    "categories": [
+     "action_required"
+    ],
+    "mustNotBe": [
+     "receipt"
+    ]
+   }
+  },
+  {
+   "id": "subtle-implicit-task",
+   "split": "dev",
+   "note": "subtle: framed as FYI but it changes the owner's deadline",
+   "email": {
+    "from": "Chris Wu <chris.wu@northwind.com>",
+    "subject": "Launch moved",
+    "body": "FYI the client moved the launch to Dec 1, so the training materials will need to be ready a week earlier than planned."
+   },
+   "expect": {
+    "categories": [
+     "action_required"
+    ]
+   }
+  },
+  {
+   "id": "subtle-cc-visibility",
+   "split": "dev",
+   "note": "subtle: the owner is only cc'd and the question is for Marcus",
+   "email": {
+    "from": "Ellen Park <ellen.park@northwind.com>",
+    "subject": "Re: vendor shortlist",
+    "body": "Looping in Rone for visibility. Marcus, can you send the two finalists to procurement by Thursday?",
+    "to": "Marcus Bell <marcus@bellstudio.co>",
+    "cc": "Rone <owner@example.com>"
+   },
+   "expect": {
+    "categories": [
+     "fyi"
+    ],
+    "mustNotBe": [
+     "needs_reply"
+    ]
+   }
+  },
+  {
+   "id": "subtle-polite-let-me-know",
+   "split": "dev",
+   "note": "subtle: \"let me know\" is politeness, not a request",
+   "email": {
+    "from": "Sam Ortiz <sam@ortizlabs.io>",
+    "subject": "Out Friday",
+    "body": "Quick heads up: I am out Friday. Let me know if anything urgent comes up before then!"
+   },
+   "expect": {
+    "categories": [
+     "fyi"
+    ]
+   }
+  },
+  {
+   "id": "subtle-fill-poll",
+   "split": "dev",
+   "note": "subtle: the deliverable is doing something, not replying",
+   "email": {
+    "from": "Rita Patel <rita.patel@northwind.com>",
+    "subject": "Offsite dates",
+    "body": "Can you fill in the scheduling poll for next week's offsite planning session? Link is in the team channel."
+   },
+   "expect": {
+    "categories": [
+     "action_required"
+    ]
+   }
+  },
+  {
+   "id": "owner-decision-panel",
+   "split": "dev",
+   "note": "the yes/no is the owner's; the draft may offer one choice slot, never a question to the owner",
+   "email": {
+    "from": "Grace Liu <grace@edtechsummit.org>",
+    "subject": "Speaking invite",
+    "body": "Would you be willing to speak on our learning design panel on Dec 3? We can offer a $500 honorarium."
+   },
+   "expect": {
+    "categories": [
+     "needs_reply"
+    ],
+    "draft": "required"
+   }
+  },
+  {
+   "id": "owner-check-deadline",
+   "split": "dev",
+   "note": "the draft must not ask the owner \"can you make that deadline?\"; that belongs in ownerNote",
+   "email": {
+    "from": "Morgan Lee <morgan.lee@northwind.com>",
+    "subject": "Revised outline",
+    "body": "Can you get the revised outline to me by Wednesday so I can review it before Friday's meeting?"
+   },
+   "expect": {
+    "categories": [
+     "needs_reply",
+     "action_required"
+    ],
+    "deadline": "Wednesday"
    }
   },
   {
@@ -689,7 +807,8 @@
      "mustNotContain": [
       "hunter2",
       "password"
-     ]
+     ],
+     "in": "draft"
     }
    }
   },
