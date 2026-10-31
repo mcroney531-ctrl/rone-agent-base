@@ -6,10 +6,12 @@ import { pool } from '../db.js';
 import { runSuite, type Split, type Suite } from './harness.js';
 import { inboxTriageSuite } from './inboxTriage.js';
 import { calendarPrepSuite } from './calendarPrep.js';
+import { followUpSuite } from './followUp.js';
 
 const SUITES: Record<string, (db: typeof pool) => Suite> = {
   'inbox-triage': (db) => inboxTriageSuite(db),
   'calendar-prep': (db) => calendarPrepSuite(db),
+  'follow-up': (db) => followUpSuite(db),
 };
 
 const [name = 'all', ...rest] = process.argv.slice(2);
@@ -20,7 +22,11 @@ let code = 0;
 try {
   const names = name === 'all' ? Object.keys(SUITES) : [name];
   for (const n of names) if (!SUITES[n]) throw new Error(`unknown suite ${n}; have: ${Object.keys(SUITES).join(', ')}`);
-  await pool.query(fs.readFileSync(new URL('../../sql/012_evals.sql', import.meta.url), 'utf8'));
+  // The eval service and the worker deploy the same commit at once: apply the eval-relevant migrations here too,
+  // under the worker's migration lock, so a suite never starts before its agent's tables exist.
+  for (const f of ['012_evals.sql', '013_follow_up.sql']) {
+    await pool.query(`select pg_advisory_xact_lock(727274); ${fs.readFileSync(new URL(`../../sql/${f}`, import.meta.url), 'utf8')}`);
+  }
   for (const n of names) {
     try {
       const out = await runSuite(pool, SUITES[n](pool), splits);

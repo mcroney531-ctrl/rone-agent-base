@@ -33,6 +33,17 @@ Chosen to stress what Calendar Prep doesn't: frequent runs (every 20 min), a new
 - **Shared connection, per-agent scopes:** `agent_connections.scopes`. An active Google connection without Gmail blocks only Inbox Triage (one Reconnect item naming it), Calendar Prep keeps running. Blocked agents now skip scheduled occurrences (`last_skip_reason = 'blocked'`) instead of failing every tick; manual runs still fail loudly.
 - **Genericity (the #1a test):** `test-inbox-triage` runs both producers and checks one Needs You list with one item shape, one health model (pause one, the other stays healthy) and pause/409 working unchanged for the new producer.
 
+### Producer #3: Follow-up Tracker (V1: waiting on others)
+
+Chosen to stress what the first two didn't: per-item timers that outlive a run, cross-producer input, and owner input beyond approve/reject. V1 tracks only "waiting on them"; the owner's own promises (V1.1) need a much stricter evidence rule.
+
+- **Durable state is rows, not sleeping workflows.** `ops.follow_up_items` (status waiting/due/closed, due_at, snoozed_until, last_owner_message_at, source_evidence). The agent runs twice an hour as a short workflow: judge new sent mail → open/re-arm items → close replied ones → surface due ones. A deploy never strands a waiting timer, and cancellation is an UPDATE.
+- **Detection:** Claude judges each new sent message once (`ops.follow_up_scanned`): waiting_on_them / owner_promise (recorded, not tracked) / none. A message that both promises and asks is waiting_on_them. Skipped deterministically: mail only to me, only no-reply recipients.
+- **Due:** 3 business days after the owner's message, 9 AM local; an explicit "reply/deliver by" date in the message wins (due the business day after it).
+- **Replies close items before they come due,** two ways: Inbox Triage's output contract `ops.thread_activity` ("inbound mail observed in thread X"; the tracker never reads Triage's own tables), and a thread read at due time (catches replies Triage never saw, and re-arms when the owner already wrote again).
+- **The due item is the reminder:** Needs You shows "Still waiting on Jane · Last message: Oct 28 · pricing approval" with **Draft nudge** (a short workflow → a gmail.draft ACTION, approval required, never sent; the item waits 2 more business days), **Snooze** (Tomorrow / In 3 days / Next week / Pick a date: the first action with an input, `choices` on the action, POSTed as `choice`), **Not needed** (closes it).
+- **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, nudges are sender-facing, add no facts, ≤1 placeholder).
+
 ### Calendar Prep retrieval (V1)
 
 Calendar Prep used to see only the invite. Now it also knows what is already known about the meeting's people, from grants the owner already gave (no new scopes):

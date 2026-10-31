@@ -43,6 +43,7 @@ psql "$DB_URL" -q -f sql/009_push_deliveries.sql
 psql "$DB_URL" -q -f sql/010_agent_pause.sql
 psql "$DB_URL" -q -f sql/011_inbox_triage.sql
 psql "$DB_URL" -q -f sql/012_evals.sql
+psql "$DB_URL" -q -f sql/013_follow_up.sql
 psql "$DB_URL" -q -f sql/002_views.sql
 echo "migrations applied: $(psql_db 'select version from dbos.dbos_migrations')"
 echo "v_runs: $(psql_db "select string_agg(workflow_id || '=' || dbos_status, ', ' order by workflow_id) from ops.v_runs")"

@@ -173,5 +173,10 @@ select 'deeper_ready', d.brief_id::text || '/' || d.event_id, b.agent_id, d.crea
   from ops.brief_deeper d join ops.briefs b on b.id = d.brief_id
  where d.content is not null and d.seen_at is null and b.brief_date >= (now() at time zone b.timezone)::date
 union all
+-- Follow-up Tracker: a message the owner sent is past due with no reply. The item itself is the reminder.
+select 'follow_up_due', f.id::text, f.agent_id, f.surfaced_at,
+       coalesce(f.counterpart_name, f.counterpart[1]) || ' · ' || coalesce(f.expects, f.subject, '')
+  from ops.follow_up_items f where f.status = 'due'
+union all
 select 'executor_unreaped', e.executor_id, null, e.last_seen_at, 'stale heartbeat, not yet reaped — is any worker alive?'
   from ops.executors e where e.reaped_at is null and e.last_seen_at < now() - interval '2 minutes';

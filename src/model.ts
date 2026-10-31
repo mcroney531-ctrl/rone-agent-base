@@ -56,6 +56,8 @@ function scriptedMock() {
         content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
       });
       if (options.responseFormat?.type === 'json' && promptText.includes('<emails>')) return stop(JSON.stringify(mockTriage(promptText)));
+      if (options.responseFormat?.type === 'json' && promptText.includes('<sent>')) return stop(JSON.stringify(mockDetect(promptText)));
+      if (options.responseFormat?.type === 'json' && promptText.includes('<nudge>')) return stop(JSON.stringify({ draft: 'Just checking in on this when you have a moment.', ownerNote: null }));
       if (options.responseFormat?.type === 'json' && promptText.includes('<deeper>')) return stop(JSON.stringify(mockDeeper(promptText)));
       if (options.responseFormat?.type === 'json') return stop(JSON.stringify(mockRanking(promptText)));
       if (promptText.includes('<deeper>')) {
@@ -123,6 +125,28 @@ function mockRanking(prompt: string) {
       hold: e.docLinks.length ? { idealMinutes: 45, minimumMinutes: 20, preferredLeadMinutes: 30 } : null,
     }));
   return { headline: `${items.length} worth preparing for`, items };
+}
+
+// Follow-up Tracker stand-in: a question or "let me know" waits on them; "I'll …" with no ask is the owner's promise.
+// "by <weekday>" resolves to that weekday on or after the sent date.
+function mockDetect(prompt: string) {
+  const rows = JSON.parse(/<sent>([\s\S]*)<\/sent>/.exec(prompt)?.[1] ?? '[]') as { ref: string; subject: string; sent: string; text: string }[];
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  return {
+    items: rows.map((r) => {
+      const t = r.text.toLowerCase();
+      const asks = /\?|let me know|can you|could you|please send/.test(t);
+      const promise = /\bi'?ll\b|\bi will\b/.test(t);
+      const by = /by (sunday|monday|tuesday|wednesday|thursday|friday|saturday)/.exec(t)?.[1];
+      let explicitDate: string | null = null;
+      if (by) {
+        const sent = new Date(`${r.sent.slice(-10)}T12:00:00Z`);
+        const add = (days.indexOf(by) - sent.getUTCDay() + 7) % 7;
+        explicitDate = new Date(sent.getTime() + add * 86_400_000).toISOString().slice(0, 10);
+      }
+      return { ref: r.ref, direction: asks ? 'waiting_on_them' : promise ? 'owner_promise' : 'none', expects: r.subject.slice(0, 40), explicitDate, evidence: r.text.slice(0, 60) };
+    }),
+  };
 }
 
 // Deeper prep stand-in: echoes the invite lines tests look for, and cites the first email message if any.

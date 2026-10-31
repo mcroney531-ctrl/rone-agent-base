@@ -31,7 +31,7 @@ export const LABELS: Record<Category, string> = {
 
 // ---------- deterministic features ----------
 
-const NO_REPLY = /(^|[._+-])(no-?reply|do-?not-?reply|donotreply|notifications?|mailer-daemon|bounces?)([._+-]|@)/i;
+export const NO_REPLY = /(^|[._+-])(no-?reply|do-?not-?reply|donotreply|notifications?|mailer-daemon|bounces?)([._+-]|@)/i;
 
 export type Features = {
   ref: string; from: string; fromAddr: string; subject: string; receivedAt: string;
@@ -180,8 +180,14 @@ async function queueAndAdvance(agentId: string, got: Intake, workflowId: string)
 
 type Triaged = { f: Features; m: MailMessage; category: Category; summary: string; draft: string | null; ownerNote?: string | null; source: 'model' | 'heuristic'; returned?: boolean };
 
-async function saveTriage(agentId: string, workflowId: string, done: Triaged[], gone: string[]) {
+async function saveTriage(agentId: string, workflowId: string, done: Triaged[], gone: string[], connectionId: string) {
   for (const t of done) {
+    // Shared output contract (ops.thread_activity): "inbound mail observed in this thread". Other producers
+    // (Follow-up Tracker closes items on a reply) read this, never ops.inbox_items.
+    await pool.query(
+      `insert into ops.thread_activity (connection_id, thread_id, message_id, from_addr, at, recorded_by)
+       values ($1, $2, $3, $4, $5, $6) on conflict do nothing`,
+      [connectionId, t.m.threadId, t.m.id, t.m.fromAddr, t.m.receivedAt, agentId]);
     await pool.query(
       `update ops.inbox_items set status = 'triaged', thread_id = $3, received_at = $4, from_addr = $5, from_name = $6, subject = $7,
               can_reply = $8, category = $9, triage_source = $10, summary = $11, label = $12, source_workflow_id = $13, triaged_at = now()
@@ -252,7 +258,7 @@ export async function inboxTriageRun(agent: AgentRow, _trigger: Trigger, workflo
     for (const { f, m } of forModel) done.push({ f, m, ...out.get(f.ref)!, source: 'model' });
   }
 
-  await DBOS.runStep(() => saveTriage(agent.id, workflowId, done, gone), { name: 'saveTriage' });
+  await DBOS.runStep(() => saveTriage(agent.id, workflowId, done, gone, ctx.connectionId), { name: 'saveTriage' });
   const proposed = await DBOS.runStep(() => proposeActions(agent, ctx, workflowId, done), { name: 'proposeActions' });
   const counts = Object.fromEntries(CATEGORIES.map((c) => [c, done.filter((d) => d.category === c).length]));
   return { text: `${got.mode}: ${queued} new, triaged ${done.length} (${JSON.stringify(counts)}), ${proposed} actions`, proposed };

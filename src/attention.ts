@@ -2,13 +2,17 @@
 // this module decides how any such row is presented and what can be done about it. Producers stay
 // generic: a new workflow adds a `kind` to the view and an entry to KINDS, and it shows up in the
 // same inbox with the same actions framework. Nothing here is Calendar-Prep-specific beyond its entries.
+import { randomUUID } from 'node:crypto';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { pool } from './db.js';
 import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE } from './workflows.js';
 import { startGoogleAuth } from './connections/google.js';
+import { closeNotNeeded, followUpNudge, snoozeItem } from './followUp.js';
 
-export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open';
-export type ItemAction = { id: ActionId; label: string; style?: 'primary' | 'danger' };
+export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed';
+// choices: the action needs one more input (e.g. Snooze: how long). The app shows them and POSTs { choice }.
+export type ActionChoice = { id: string; label: string; input?: 'date' };
+export type ItemAction = { id: ActionId; label: string; style?: 'primary' | 'danger'; choices?: ActionChoice[] };
 export type Severity = 'decision' | 'problem' | 'info';
 
 export type AttentionItem = {
@@ -33,6 +37,9 @@ const A = {
   runNow: { id: 'run_now', label: 'Run now' },
   reauth: { id: 'reauth', label: 'Reconnect', style: 'primary' },
   open: { id: 'open', label: 'View', style: 'primary' },
+  nudge: { id: 'nudge', label: 'Draft nudge', style: 'primary' },
+  snooze: { id: 'snooze', label: 'Snooze', choices: [{ id: '1d', label: 'Tomorrow' }, { id: '3d', label: 'In 3 days' }, { id: '1w', label: 'Next week' }, { id: 'date', label: 'Pick a date', input: 'date' }] },
+  notNeeded: { id: 'not_needed', label: 'Not needed' },
 } satisfies Record<string, ItemAction>;
 
 const humanize = (id: string) => id.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_:.]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
@@ -65,6 +72,12 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
     },
     actions: (r) => (r.extra?.logical_action === 'gmail.draft' ? [{ ...A.approve, label: 'Approve draft' }, A.reject] : [A.approve, A.reject]),
   },
+  follow_up_due: {
+    severity: 'decision',
+    title: (r) => `Still waiting on ${r.extra?.counterpart_name ?? r.extra?.counterpart?.[0] ?? 'a reply'}`,
+    summary: (r) => `Last message: ${fmtDay(r.extra?.last_owner_message_at)} · ${r.extra?.expects ?? r.extra?.subject ?? ''}`,
+    actions: () => [A.nudge, A.snooze, A.notNeeded],
+  },
   brief_ready: { severity: 'info', title: () => 'Brief is ready', actions: () => [A.open, A.dismiss] },
   deeper_ready: { severity: 'info', title: () => 'Deeper prep ready', actions: () => [A.open, A.dismiss] },
   connection_problem: {
@@ -86,8 +99,13 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
   no_executor_for_version: { severity: 'problem', title: () => 'No worker for this version', actions: () => [A.dismiss] },
   executor_unreaped: { severity: 'problem', title: () => 'Worker stopped responding', actions: () => [A.dismiss] },
 };
-const DECISION_KINDS = new Set(['approval_needed', 'connection_problem']); // only resolving them clears them
+const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due']); // only resolving them clears them
 const FALLBACK = { severity: 'problem' as Severity, title: (r: Row) => humanize(r.kind), actions: () => [A.dismiss] };
+
+function fmtDay(iso?: string): string {
+  if (!iso) return '?';
+  return new Intl.DateTimeFormat('en-US', { timeZone: process.env.OWNER_TIMEZONE ?? 'America/New_York', month: 'short', day: 'numeric' }).format(new Date(iso));
+}
 
 function fmtRange(start: string, end?: string): string {
   const tz = process.env.OWNER_TIMEZONE ?? 'America/New_York';
@@ -114,7 +132,12 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
     `select q.kind, q.ref, q.agent_id, q.since, q.detail,
             case when q.kind in ('approval_needed', 'action_failed') then
               (select jsonb_build_object('logical_action', a.logical_action, 'payload', a.payload, 'target', a.target)
-                 from ops.actions a where a.id::text = q.ref) end as extra
+                 from ops.actions a where a.id::text = q.ref)
+              when q.kind = 'follow_up_due' then
+                (select jsonb_build_object('counterpart', f.counterpart, 'counterpart_name', f.counterpart_name, 'subject', f.subject, 'expects', f.expects,
+                         'last_owner_message_at', f.last_owner_message_at, 'due_at', f.due_at, 'explicit_date', f.explicit_date,
+                         'evidence', f.source_evidence, 'nudges', f.nudges)
+                   from ops.follow_up_items f where f.id::text = q.ref) end as extra
        from ops.attention_queue q
        left join ops.attention_acks k on k.kind = q.kind and k.ref = q.ref
       where (k.acked_at is null or q.since > k.acked_at)
@@ -141,6 +164,13 @@ export async function attentionDetail(kind: string, ref: string) {
       : JSON.stringify(v, null, 2);
     facts.push({ label, value });
   };
+  if (kind === 'follow_up_due') {
+    const x = row.extra ?? {};
+    add('Waiting on', x.counterpart_name ? `${x.counterpart_name} <${x.counterpart?.[0]}>` : (x.counterpart ?? []).join(', '));
+    add('Subject', x.subject); add('For', x.expects); add('You wrote', x.evidence?.quote ? `“${x.evidence.quote}”` : null);
+    add('Last message', fmtDay(x.last_owner_message_at)); add('Asked for by', x.explicit_date ? fmtDay(`${x.explicit_date}T12:00:00Z`) : null);
+    if (x.nudges) add('Nudges so far', String(x.nudges));
+  }
   if (kind === 'approval_needed' || kind === 'action_failed' || kind === 'action_stuck') {
     const { rows: [a] } = await pool.query(`select * from ops.actions where id::text = $1`, [ref]);
     if (a) {
@@ -184,7 +214,7 @@ export async function attentionDetail(kind: string, ref: string) {
 export type ActResult = { ok: boolean; status: number; message: string; redirect?: string; workflowId?: string };
 
 // Every action re-checks that the item still needs the owner and still offers that action.
-export async function actOnAttention(kind: string, ref: string, action: string, by: string, requestId?: string): Promise<ActResult> {
+export async function actOnAttention(kind: string, ref: string, action: string, by: string, requestId?: string, choice?: string): Promise<ActResult> {
   const [row] = await rows({ kind, ref });
   if (!row) return { ok: false, status: 409, message: 'This no longer needs you.' };
   const item = toItem(row);
@@ -218,6 +248,18 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
       return { ok: true, status: 200, message: 'Opening Google…', redirect: await startGoogleAuth(ref) };
     case 'open':
       return { ok: true, status: 200, message: '' };
+    case 'snooze': {
+      if (!choice) return { ok: false, status: 400, message: 'Choose when to be reminded.' };
+      const r = await snoozeItem(ref, choice, by);
+      return { ok: r.ok, status: r.ok ? 200 : 400, message: r.message };
+    }
+    case 'not_needed':
+      return (await closeNotNeeded(ref)) ? { ok: true, status: 200, message: 'Closed. No follow-up needed.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
+    case 'nudge': {
+      const workflowId = `nudge-${ref}-${requestId || randomUUID()}`;
+      await DBOS.startWorkflow(followUpNudge, { workflowID: workflowId, queueName: AGENT_QUEUE })(ref);
+      return { ok: true, status: 202, message: 'Drafting a nudge. It will appear for approval.', workflowId };
+    }
   }
   return { ok: false, status: 400, message: 'Unknown action.' };
 }

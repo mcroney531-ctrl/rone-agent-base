@@ -108,15 +108,39 @@ function parseFrom(v: string): { name: string | null; addr: string } {
   return m ? { name: m[1].trim() || null, addr: m[2].trim().toLowerCase() } : { name: null, addr: v.trim().toLowerCase() };
 }
 
+type RawMessage = { id: string; threadId: string; labelIds?: string[]; internalDate: string; snippet?: string; payload?: Part };
+
 /** One message: the headers triage needs, plus up to `maxBody` chars of plain text. Null if it's gone. */
 export async function getMessage(connectionId: string, id: string, maxBody = 4000): Promise<MailMessage | null> {
-  let m: { id: string; threadId: string; labelIds?: string[]; internalDate: string; snippet?: string; payload?: Part };
+  let m: RawMessage;
   try {
     m = await gmail(connectionId, 'GET', `/messages/${encodeURIComponent(id)}?format=full`);
   } catch (e) {
     if (e instanceof GmailApiError && e.status === 404) return null;
     throw e;
   }
+  return parseMessage(m, maxBody);
+}
+
+/** Read-only (Follow-up Tracker): IDs of mail the owner sent in the last `days` days, newest first. */
+export async function recentSentIds(connectionId: string, days: number, cap = 50): Promise<string[]> {
+  const q = new URLSearchParams({ q: `in:sent newer_than:${days}d -in:drafts`, maxResults: String(Math.min(cap, 100)) });
+  const r = await gmail<{ messages?: { id: string }[] }>(connectionId, 'GET', `/messages?${q}`);
+  return (r.messages ?? []).map((m) => m.id).slice(0, cap);
+}
+
+/** Read-only (Follow-up Tracker): every message in a thread, oldest first. Null if the thread is gone. */
+export async function threadMessages(connectionId: string, threadId: string, maxBody = 1000): Promise<MailMessage[] | null> {
+  try {
+    const t = await gmail<{ messages?: RawMessage[] }>(connectionId, 'GET', `/threads/${encodeURIComponent(threadId)}?format=full`);
+    return (t.messages ?? []).map((m) => parseMessage(m, maxBody)).sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
+  } catch (e) {
+    if (e instanceof GmailApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+function parseMessage(m: RawMessage, maxBody: number): MailMessage {
   const h = (name: string) => m.payload?.headers?.find((x) => x.name.toLowerCase() === name.toLowerCase())?.value ?? null;
   const from = h('From') ?? '';
   const f = parseFrom(from);

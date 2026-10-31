@@ -62,7 +62,7 @@ it uses the deployed configuration. It is a separate process, so an eval never c
 
 - It runs only when semantic behaviour can change: the service's watch paths are the agent's judgment code,
   the model wiring, the eval code and corpus, and the SQL that seeds agent config (`src/inboxTriage.ts`,
-  `src/model.ts`, `src/calendarPrep.ts`, `src/retrieval.ts`, `src/connections/gmail.ts`, `src/eval/**`, `evals/**`,
+  `src/model.ts`, `src/calendarPrep.ts`, `src/retrieval.ts`, `src/followUp.ts`, `src/connections/gmail.ts`, `src/eval/**`, `evals/**`,
   `sql/**`). Other changes (UI, infra) skip it; normal CI covers them. It runs every suite (`run.ts all`).
   Add a new agent's judgment files to the watch paths with its suite.
 - On demand: redeploy the `eval` service. For a PR, point the service at the PR branch, deploy, read the
@@ -80,6 +80,9 @@ with acceptable sets, recording, provenance and baselines. It never calls a paid
   the A/B delta is the point. Deeper-prep scenarios check claims are sourced, no request becomes the owner's
   commitment, injection is ignored, ≤200 words (all critical), and that known context is surfaced (report).
   Ranking scenarios check that a meeting with live context is picked.
+- `follow-up`: synthetic sent mail, judged in one batch as in production: waiting on them / the owner's promise /
+  nothing, plus the explicit reply-by date (report). Critical: a promise is never tracked as waiting on them
+  (`mustNotBe`); nudges are sender-facing, add no facts, ≤1 placeholder.
 
 ## Adding a suite
 

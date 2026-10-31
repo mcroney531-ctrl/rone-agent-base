@@ -69,7 +69,7 @@ check('scoring: critical failures are listed, quality is separate', m.critical.l
 
 // ---- a full recorded run (scripted model) ----
 for (const f of ['001_ops_schema.sql', '003_connections.sql', '004_calendar_prep.sql', '005_attention.sql', '006_prep_holds.sql', '007_brief_view.sql',
-  '008_push.sql', '009_push_deliveries.sql', '010_agent_pause.sql', '011_inbox_triage.sql', '012_evals.sql']) {
+  '008_push.sql', '009_push_deliveries.sql', '010_agent_pause.sql', '011_inbox_triage.sql', '012_evals.sql', '013_follow_up.sql']) {
   await db.query(fs.readFileSync(path.resolve('sql', f), 'utf8'));
 }
 const { pool } = await import('../src/db.js');
@@ -99,6 +99,14 @@ try {
     cp.metrics.byGroup.with.accuracy > cp.metrics.byGroup.without.accuracy, cp.metrics.byGroup);
   check('calendar-prep: the scripted model cites only real sources (no critical failures)', cp.status === 'passed', cp.metrics.critical);
   console.log(`\n${cp.report}\n`);
+
+  // ---- Follow-up suite: detection + nudge, scripted model ----
+  const { followUpSuite, loadCorpus: loadFu } = await import('../src/eval/followUp.js');
+  const fuN = loadFu().corpus.scenarios.length;
+  const fu = await runSuite(pool, followUpSuite(pool), ['dev', 'holdout']);
+  check('follow-up: every scenario judged in one batch and recorded', fu.metrics.n === fuN && fu.metrics.byLabel.waiting_on_them.support > 0, fu.metrics);
+  check('follow-up: the scripted model never tracks the owner\'s own promise (no critical failures)', fu.status === 'passed', fu.metrics.critical);
+  console.log(`\n${fu.report}\n`);
 } finally {
   await pool.end();
   await db.end();
