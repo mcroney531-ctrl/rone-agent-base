@@ -55,14 +55,15 @@ corpus and splits. So "did the prompt regress, or did the model/config or the la
 
 ## Running
 
-The **`eval` Railway service** runs `node --import tsx src/eval/run.ts inbox-triage` once and exits (restart
+The **`eval` Railway service** runs `node --import tsx src/eval/run.ts all` (every suite) once and exits (restart
 policy: never). It shares the worker's `ANTHROPIC_API_KEY` and `DATABASE_URL` by Railway variable reference
 (no copy of the secret, none in GitHub) and reads the agent's model and instructions from `ops.agents`, so
 it uses the deployed configuration. It is a separate process, so an eval never competes with scheduled work.
 
 - It runs only when semantic behaviour can change: the service's watch paths are the agent's judgment code,
   the model wiring, the eval code and corpus, and the SQL that seeds agent config (`src/inboxTriage.ts`,
-  `src/model.ts`, `src/eval/**`, `evals/**`, `sql/**`). Other changes (UI, infra) skip it; normal CI covers them.
+  `src/model.ts`, `src/calendarPrep.ts`, `src/retrieval.ts`, `src/connections/gmail.ts`, `src/eval/**`, `evals/**`,
+  `sql/**`). Other changes (UI, infra) skip it; normal CI covers them. It runs every suite (`run.ts all`).
   Add a new agent's judgment files to the watch paths with its suite.
 - On demand: redeploy the `eval` service. For a PR, point the service at the PR branch, deploy, read the
   run, then point it back at `main`.
@@ -72,10 +73,17 @@ it uses the deployed configuration. It is a separate process, so an eval never c
 CI (`scripts/test-eval.ts`) tests the machinery against the scripted model: the checks, the corpus, scoring
 with acceptable sets, recording, provenance and baselines. It never calls a paid model.
 
+## Suites
+
+- `inbox-triage`: corpus of synthetic emails (dev + holdout), categories with acceptable sets, draft invariants.
+- `calendar-prep`: every scenario runs twice, `with` and `without` retrieval context, reported per arm ("by arm"):
+  the A/B delta is the point. Deeper-prep scenarios check claims are sourced, no request becomes the owner's
+  commitment, injection is ignored, ≤200 words (all critical), and that known context is surfaced (report).
+  Ranking scenarios check that a meeting with live context is picked.
+
 ## Adding a suite
 
 Implement `Suite` (`src/eval/harness.ts`): `provenance()` and `run(splits)` returning per-scenario results
 with checks, using the agent's own judgment-layer function (Inbox Triage exports `classify()`, which both the
-workflow and the eval call). Register it in `src/eval/run.ts`. Calendar Prep next: synthetic event objects fed
-straight into its ranking prompt/model (no Google reads or writes), expected meetings selected, expected holds
-or none.
+workflow and the eval call). Register it in `src/eval/run.ts`. Calendar Prep feeds synthetic events and sources straight
+into `rankDay()` / `deeperBrief()` (no Google calls).
