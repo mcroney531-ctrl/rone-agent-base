@@ -9,6 +9,7 @@
 // Labels may allow more than one answer (`acceptable`), so the harness doesn't reward brittle behaviour.
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
 import type pg from 'pg';
 
 export type Split = 'dev' | 'holdout';
@@ -34,6 +35,45 @@ export interface Suite {
   labels: readonly string[];
   provenance(): Promise<Provenance>;
   run(splits: Split[]): Promise<ScenarioResult[]>;
+}
+
+// Agent config (model + instructions) a suite evaluates. Normally read from ops.agents; the runner can set a
+// preview: the rows a PR's migrations WOULD produce, read inside a rolled-back transaction (src/eval/run.ts),
+// so an eval never mutates the production schema ahead of the worker that understands it.
+let agentPreview: Map<string, { model: string; instructions: string }> | null = null;
+export function setAgentPreview(rows: { id: string; model: string; instructions: string }[] | null) {
+  agentPreview = rows ? new Map(rows.map((r) => [r.id, { model: r.model, instructions: r.instructions }])) : null;
+}
+export async function agentConfig(db: pg.Pool, id: string): Promise<{ model: string; instructions: string }> {
+  const p = agentPreview?.get(id);
+  if (p) return p;
+  const { rows: [a] } = await db.query(`select model, instructions from ops.agents where id = $1`, [id]);
+  if (!a) throw new Error(`agent ${id} not found`);
+  return a;
+}
+
+/**
+ * The agent rows this commit's migrations WOULD produce (a PR may add an agent or change its prompt), read by
+ * applying every migration inside a transaction that is then ROLLED BACK. Short lock timeout: a dry run must
+ * never stall the live worker; if it can't get a lock it gives up and the suites use the live rows.
+ */
+export async function previewAgents(pool: pg.Pool): Promise<{ id: string; model: string; instructions: string }[] | null> {
+  const dir = new URL('../../sql/', import.meta.url);
+  const files = fs.readdirSync(dir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort();
+  const ordered = files.filter((f) => !f.startsWith('002_')); // views don't change agent rows (and need DBOS's tables)
+  const c = await pool.connect();
+  try {
+    await c.query(`begin; set local lock_timeout = '3s'; set local statement_timeout = '30s'`);
+    for (const f of ordered) await c.query(fs.readFileSync(new URL(f, dir), 'utf8'));
+    const { rows } = await c.query(`select id, model, instructions from ops.agents`);
+    return rows;
+  } catch (e) {
+    console.warn(`[eval] migration preview failed, using live agent rows: ${(e as Error).message}`);
+    return null;
+  } finally {
+    await c.query('rollback').catch(() => undefined);
+    c.release();
+  }
 }
 
 export const sha = (s: string, n = 12) => createHash('sha256').update(s).digest('hex').slice(0, n);

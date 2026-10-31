@@ -10,7 +10,7 @@ import type pg from 'pg';
 import { plainModel } from '../model.js';
 import { deeperBrief, deeperPrompt, DeeperSchema, rankDay, rankingPrompt, RankingSchema, type DeeperInput, type EventFeatures } from '../calendarPrep.js';
 import type { ContextSignals, RetrievedContext } from '../retrieval.js';
-import { sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
+import { agentConfig, sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
 
 export const EVALUATOR_VERSION = '4'; // 4: word cap is enforced in code; critical on what is shown, raw overshoot reported
 const CORPUS = new URL('../../evals/calendar-prep/corpus.json', import.meta.url);
@@ -51,11 +51,7 @@ function features(e: Partial<EventFeatures> & { eventId: string; title: string; 
 
 export function calendarPrepSuite(db: pg.Pool, opts: { corpusFile?: URL | string } = {}): Suite {
   const { corpus, hash } = loadCorpus(opts.corpusFile);
-  const agent = async () => {
-    const { rows: [a] } = await db.query(`select model, instructions from ops.agents where id = 'calendar-prep'`);
-    if (!a) throw new Error('agent calendar-prep not found');
-    return a as { model: string; instructions: string };
-  };
+  const agent = () => agentConfig(db, 'calendar-prep');
   return {
     name: 'calendar-prep',
     labels: ['pass', 'miss'],

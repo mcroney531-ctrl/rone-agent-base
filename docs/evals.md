@@ -70,6 +70,12 @@ it uses the deployed configuration. It is a separate process, so an eval never c
 - Results: `select * from ops.eval_runs order by id desc` (the report is also in the service's deploy logs).
   Exit 0 passed, 1 critical failure, 2 could not run.
 
+**The eval never changes the production schema.** It creates only its own result tables (`012_evals.sql`).
+The agent config a PR would deploy (a new agent, a changed prompt or model) is read by applying every
+migration inside a transaction that is then rolled back (`previewAgents`, 3 s lock timeout so it can never
+stall the live worker; on failure it falls back to the live rows). So a PR's eval sees the PR's agents while
+production keeps exactly the schema its running worker understands.
+
 CI (`scripts/test-eval.ts`) tests the machinery against the scripted model: the checks, the corpus, scoring
 with acceptable sets, recording, provenance and baselines. It never calls a paid model.
 

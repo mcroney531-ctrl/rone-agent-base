@@ -1,5 +1,5 @@
 {
- "version": "1",
+ "version": "2",
  "scenarios": [
   {
    "id": "ask-thoughts",
@@ -303,6 +303,57 @@
     "mustNotBe": [
      "waiting_on_them"
     ]
+   }
+  },
+  {
+   "id": "date-owner-waits-until",
+   "split": "dev",
+   "sent": {
+    "to": "Jane Doe <jane@acme.com>",
+    "subject": "Proposal",
+    "body": "No rush, I'm out until Friday anyway. Could you look at the proposal when you get a chance?",
+    "sentAt": "2026-10-28T14:00:00Z"
+   },
+   "expect": {
+    "categories": [
+     "waiting_on_them"
+    ],
+    "explicitDate": null,
+    "note": "Friday is when the owner is back, not a reply-by date"
+   }
+  },
+  {
+   "id": "date-meeting-then-ask",
+   "split": "dev",
+   "sent": {
+    "to": "Sam Ortiz <sam@ortizlabs.io>",
+    "subject": "Friday sync",
+    "body": "Let's talk Friday at 2. Can you send the agenda beforehand?",
+    "sentAt": "2026-10-28T14:00:00Z"
+   },
+   "expect": {
+    "categories": [
+     "waiting_on_them"
+    ],
+    "explicitDate": null,
+    "note": "Friday is the meeting; \"beforehand\" is not a date"
+   }
+  },
+  {
+   "id": "date-own-deadline",
+   "split": "dev",
+   "sent": {
+    "to": "Rita Patel <rita.patel@northwind.com>",
+    "subject": "Report",
+    "body": "My report is due Friday. Do you have the latest headcount?",
+    "sentAt": "2026-10-28T14:00:00Z"
+   },
+   "expect": {
+    "categories": [
+     "waiting_on_them"
+    ],
+    "explicitDate": null,
+    "note": "the owner's own deadline, not theirs"
    }
   },
   {

@@ -3,7 +3,7 @@
 // Exit code: 0 passed, 1 a critical invariant failed (BLOCK), 2 an eval could not run.
 import fs from 'node:fs';
 import { pool } from '../db.js';
-import { runSuite, type Split, type Suite } from './harness.js';
+import { previewAgents, runSuite, setAgentPreview, type Split, type Suite } from './harness.js';
 import { inboxTriageSuite } from './inboxTriage.js';
 import { calendarPrepSuite } from './calendarPrep.js';
 import { followUpSuite } from './followUp.js';
@@ -22,11 +22,9 @@ let code = 0;
 try {
   const names = name === 'all' ? Object.keys(SUITES) : [name];
   for (const n of names) if (!SUITES[n]) throw new Error(`unknown suite ${n}; have: ${Object.keys(SUITES).join(', ')}`);
-  // The eval service and the worker deploy the same commit at once: apply the eval-relevant migrations here too,
-  // under the worker's migration lock, so a suite never starts before its agent's tables exist.
-  for (const f of ['012_evals.sql', '013_follow_up.sql']) {
-    await pool.query(`select pg_advisory_xact_lock(727274); ${fs.readFileSync(new URL(`../../sql/${f}`, import.meta.url), 'utf8')}`);
-  }
+  // The eval never changes the production schema. Its own tables (012, eval-owned) are the one exception.
+  await pool.query(`select pg_advisory_xact_lock(727274); ${fs.readFileSync(new URL('../../sql/012_evals.sql', import.meta.url), 'utf8')}`);
+  setAgentPreview(await previewAgents(pool));
   for (const n of names) {
     try {
       const out = await runSuite(pool, SUITES[n](pool), splits);

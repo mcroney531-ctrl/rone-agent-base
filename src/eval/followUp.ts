@@ -9,9 +9,9 @@ import { plainModel } from '../model.js';
 import type { MailMessage } from '../connections/gmail.js';
 import { detectPrompt, detectWaiting, DetectSchema, draftNudge, nudgePrompt, NudgeSchema, sentFeatures, type SentFeatures } from '../followUp.js';
 import { ownerFacing, placeholders, unsupportedFacts } from './inboxTriage.js';
-import { sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
+import { agentConfig, sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
 
-export const EVALUATOR_VERSION = '1';
+export const EVALUATOR_VERSION = '2'; // 2: a date that isn't a reply-by date must not anchor the timer (critical)
 const CORPUS = new URL('../../evals/follow-up/corpus.json', import.meta.url);
 const OWNER = 'rone@example.com';
 const TZ = 'America/New_York';
@@ -42,11 +42,7 @@ function toMessage(id: string, s: z.infer<typeof Scenario>['sent']): MailMessage
 
 export function followUpSuite(db: pg.Pool, opts: { corpusFile?: URL | string } = {}): Suite {
   const { corpus, hash } = loadCorpus(opts.corpusFile);
-  const agent = async () => {
-    const { rows: [a] } = await db.query(`select model, instructions from ops.agents where id = 'follow-up-tracker'`);
-    if (!a) throw new Error('agent follow-up-tracker not found');
-    return a as { model: string; instructions: string };
-  };
+  const agent = () => agentConfig(db, 'follow-up-tracker');
   return {
     name: 'follow-up',
     labels: Dir.options,
@@ -75,7 +71,10 @@ export function followUpSuite(db: pg.Pool, opts: { corpusFile?: URL | string } =
           { id: 'must_not_be', critical: true, pass: !s.expect.mustNotBe.includes(d.direction), detail: s.expect.mustNotBe.includes(d.direction) ? d.direction : undefined },
         ];
         if (s.expect.explicitDate !== undefined && d.direction === 'waiting_on_them') {
-          checks.push({ id: 'explicit_date', critical: false, pass: d.explicitDate === s.expect.explicitDate, detail: `${d.explicitDate} vs ${s.expect.explicitDate}` });
+          // A named date becomes the timer anchor only when the message asks them to reply/deliver by it.
+          // Anchoring on a meeting date or "I'll wait until Friday" is critical; missing or misreading a real one is reported.
+          if (s.expect.explicitDate === null) checks.push({ id: 'no_false_date_anchor', critical: true, pass: d.explicitDate === null, detail: d.explicitDate ? `anchored on ${d.explicitDate}` : undefined });
+          else checks.push({ id: 'explicit_date', critical: false, pass: d.explicitDate === s.expect.explicitDate, detail: `${d.explicitDate} vs ${s.expect.explicitDate}` });
         }
         let nudge: { draft: string; ownerNote: string | null } | null = null;
         if (s.expect.nudge) {

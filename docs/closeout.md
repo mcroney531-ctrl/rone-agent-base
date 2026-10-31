@@ -42,7 +42,8 @@ Chosen to stress what the first two didn't: per-item timers that outlive a run, 
 - **Due:** 3 business days after the owner's message, 9 AM local; an explicit "reply/deliver by" date in the message wins (due the business day after it).
 - **Replies close items before they come due,** two ways: Inbox Triage's output contract `ops.thread_activity` ("inbound mail observed in thread X"; the tracker never reads Triage's own tables), and a thread read at due time (catches replies Triage never saw, and re-arms when the owner already wrote again).
 - **The due item is the reminder:** Needs You shows "Still waiting on Jane · Last message: Oct 28 · pricing approval" with **Draft nudge** (a short workflow → a gmail.draft ACTION, approval required, never sent; the item waits 2 more business days), **Snooze** (Tomorrow / In 3 days / Next week / Pick a date: the first action with an input, `choices` on the action, POSTed as `choice`), **Not needed** (closes it).
-- **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, nudges are sender-facing, add no facts, ≤1 placeholder).
+- **Named dates:** a date anchors the timer only when the message asks them to reply/deliver by it; a meeting date, the owner's own deadline or "I'm out until Friday" never does (critical in the eval).
+- **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, no false date anchor, nudges are sender-facing, add no facts, ≤1 placeholder).
 
 ### Calendar Prep retrieval (V1)
 
