@@ -38,7 +38,10 @@ export function assertServedClientCompatible(appHtml: string): number {
 // ---------- the shapes the app depends on ----------
 // Objects are deliberately not strict: adding fields is compatible, removing or renaming one is not.
 // Tests parse every /attention response through these, for every producer.
-const ItemAction = z.object({ id: z.string(), label: z.string(), style: z.enum(['primary', 'danger']).optional() });
+const ItemAction = z.object({
+  id: z.string(), label: z.string(), style: z.enum(['primary', 'danger']).optional(),
+  choices: z.array(z.object({ id: z.string(), label: z.string(), input: z.enum(['date']).optional() })).optional(), // additive
+});
 
 export const AttentionItemSchema = z.object({
   id: z.string(),

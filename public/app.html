@@ -48,6 +48,7 @@
   .title { font-weight: 600; margin: 4px 0 2px; }
   .summary { color: var(--muted); font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .actions .pick { display: flex; align-items: center; gap: 6px; font-size: 14px; }
   button, .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 15px;
                  padding: 9px 14px; border-radius: 10px; min-height: 40px; cursor: pointer; }
   button.primary { background: var(--banner); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
@@ -229,6 +230,27 @@ function codeScreen(address) {
 }
 
 function actionButtons(item, after) {
+  const send = async (a, btn, choice) => {
+    btn.disabled = true;
+    try {
+      const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid(), ...(choice ? { choice } : {}) } });
+      if (r.body.redirect) { location.href = r.body.redirect; return; }
+      toast(r.body.message || (r.status < 300 ? 'Done' : 'Failed'));
+      if (r.status < 300) after(); else btn.disabled = false;
+    } catch (err) { handleErr(err); }
+  };
+  // An action with choices (e.g. Snooze: how long) swaps the row for its choices; a date choice shows a picker.
+  const showChoices = (a, row) => {
+    const back = () => row.replaceChildren(...actionButtons(item, after));
+    const kids = a.choices.map((c) => {
+      if (c.input !== 'date') return h('button', { onclick: (e) => { e.stopPropagation(); send(a, e.currentTarget, c.id); } }, c.label);
+      const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+      const picker = h('input', { type: 'date', min: tomorrow, onclick: (e) => e.stopPropagation(),
+        onchange: (e) => { if (e.currentTarget.value) send(a, e.currentTarget, e.currentTarget.value); } });
+      return h('label', { class: 'pick', onclick: (e) => e.stopPropagation() }, `${c.label} `, picker);
+    });
+    row.replaceChildren(...kids, h('button', { class: 'back', onclick: (e) => { e.stopPropagation(); back(); } }, 'Cancel'));
+  };
   return (item.actions ?? []).map((a) => h('button', {
     class: a.style ?? '',
     onclick: async (e) => {
@@ -237,14 +259,9 @@ function actionButtons(item, after) {
         if (item.type === 'deeper_ready') return go(`#/brief/${enc(item.ref.split('/')[0])}`);
         return go(item.type.startsWith('brief') ? `#/brief/${enc(item.ref)}` : `#/item/${enc(item.type)}/${enc(item.ref)}`);
       }
+      if (a.choices?.length) return showChoices(a, e.currentTarget.parentElement);
       if (a.id === 'reject' && !confirm(`Reject "${item.title}"?`)) return;
-      e.currentTarget.disabled = true;
-      try {
-        const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid() } });
-        if (r.body.redirect) { location.href = r.body.redirect; return; }
-        toast(r.body.message || (r.status < 300 ? 'Done' : 'Failed'));
-        after();
-      } catch (err) { handleErr(err); }
+      send(a, e.currentTarget);
     },
   }, a.label));
 }

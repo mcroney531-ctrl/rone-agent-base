@@ -62,13 +62,19 @@ it uses the deployed configuration. It is a separate process, so an eval never c
 
 - It runs only when semantic behaviour can change: the service's watch paths are the agent's judgment code,
   the model wiring, the eval code and corpus, and the SQL that seeds agent config (`src/inboxTriage.ts`,
-  `src/model.ts`, `src/calendarPrep.ts`, `src/retrieval.ts`, `src/connections/gmail.ts`, `src/eval/**`, `evals/**`,
+  `src/model.ts`, `src/calendarPrep.ts`, `src/retrieval.ts`, `src/followUp.ts`, `src/connections/gmail.ts`, `src/eval/**`, `evals/**`,
   `sql/**`). Other changes (UI, infra) skip it; normal CI covers them. It runs every suite (`run.ts all`).
   Add a new agent's judgment files to the watch paths with its suite.
 - On demand: redeploy the `eval` service. For a PR, point the service at the PR branch, deploy, read the
   run, then point it back at `main`.
 - Results: `select * from ops.eval_runs order by id desc` (the report is also in the service's deploy logs).
   Exit 0 passed, 1 critical failure, 2 could not run.
+
+**The eval never changes the production schema.** It creates only its own result tables (`012_evals.sql`).
+The agent config a PR would deploy (a new agent, a changed prompt or model) is read by applying every
+migration inside a transaction that is then rolled back (`previewAgents`, 3 s lock timeout so it can never
+stall the live worker; on failure it falls back to the live rows). So a PR's eval sees the PR's agents while
+production keeps exactly the schema its running worker understands.
 
 CI (`scripts/test-eval.ts`) tests the machinery against the scripted model: the checks, the corpus, scoring
 with acceptable sets, recording, provenance and baselines. It never calls a paid model.
@@ -80,6 +86,9 @@ with acceptable sets, recording, provenance and baselines. It never calls a paid
   the A/B delta is the point. Deeper-prep scenarios check claims are sourced, no request becomes the owner's
   commitment, injection is ignored, ≤200 words (all critical), and that known context is surfaced (report).
   Ranking scenarios check that a meeting with live context is picked.
+- `follow-up`: synthetic sent mail, judged in one batch as in production: waiting on them / the owner's promise /
+  nothing, plus the explicit reply-by date (report). Critical: a promise is never tracked as waiting on them
+  (`mustNotBe`); nudges are sender-facing, add no facts, ≤1 placeholder.
 
 ## Adding a suite
 

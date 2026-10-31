@@ -114,6 +114,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-inbox-triage.ts
 
+      - name: Follow-up Tracker (fake Gmail) - durable items, reply-closes, snooze/not needed/nudge
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-follow-up.ts
+
       - name: Eval harness (checks, corpus, recorded run on the scripted model)
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs

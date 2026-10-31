@@ -65,6 +65,7 @@ await applySql('009_push_deliveries.sql');
 await applySql('010_agent_pause.sql');
 await applySql('011_inbox_triage.sql');
 await applySql('012_evals.sql');
+await applySql('013_follow_up.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -206,7 +207,8 @@ const server = http.createServer(async (req, res) => {
         return d ? send(res, 200, d) : send(res, 404, { error: 'no longer needs you' });
       }
       if (req.method === 'POST' && parts.length === 4) {
-        const r = await actOnAttention(kind, ref, parts[3], by, String((await readJson(req)).requestId ?? ''));
+        const body = await readJson(req);
+        const r = await actOnAttention(kind, ref, parts[3], by, String(body.requestId ?? ''), typeof body.choice === 'string' ? body.choice : undefined);
         return send(res, r.status, r);
       }
     }

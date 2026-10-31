@@ -312,6 +312,7 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
     if (msgid) list = list.filter((m) => gmHeader(m, 'Message-ID') === msgid);
     if (/(^|\s)in:drafts/.test(q)) list = list.filter((m) => m.labelIds.includes('DRAFT'));
     if (/in:inbox/.test(q)) list = list.filter((m) => m.labelIds.includes('INBOX'));
+    if (/in:sent/.test(q)) list = list.filter((m) => m.labelIds.includes('SENT'));
     // {from:a to:a cc:b …}: Gmail's OR group, matched on addresses in From/To/Cc.
     const group = /\{([^}]*)\}/.exec(q)?.[1];
     if (group) {
@@ -323,6 +324,16 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
     if (days) list = list.filter((m) => m.internalDate > Date.now() - Number(days) * 86_400_000);
     list.sort((a, b) => b.internalDate - a.internalDate);
     return send(res, 200, { messages: list.map((m) => ({ id: m.id, threadId: m.threadId })), resultSizeEstimate: list.length }), true;
+  }
+  const toApi = (m: GmMsg) => ({
+    id: m.id, threadId: m.threadId, labelIds: m.labelIds, internalDate: String(m.internalDate), snippet: m.body.slice(0, 100),
+    payload: { mimeType: 'text/plain', headers: m.headers, body: { data: Buffer.from(m.body).toString('base64url') } },
+  });
+  const tm = /^\/threads\/([^/]+)$/.exec(r);
+  if (tm && req.method === 'GET') {
+    const msgs = [...GM.messages.values()].filter((m) => m.threadId === decodeURIComponent(tm[1]) && !m.labelIds.includes('DRAFT'));
+    if (!msgs.length) return send(res, 404, { error: { code: 404, message: 'Requested entity was not found.' } }), true;
+    return send(res, 200, { id: tm[1], messages: msgs.sort((a, b) => a.internalDate - b.internalDate).map(toApi) }), true;
   }
   const mm = /^\/messages\/([^/]+)(\/modify)?$/.exec(r);
   if (mm && req.method === 'GET' && !mm[2]) {

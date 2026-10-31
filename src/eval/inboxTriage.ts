@@ -8,7 +8,7 @@ import type pg from 'pg';
 import { plainModel } from '../model.js';
 import type { MailMessage } from '../connections/gmail.js';
 import { BATCH, CATEGORIES, classify, features, heuristic, triagePrompt, TriageSchema, type Category, type Features } from '../inboxTriage.js';
-import { sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
+import { agentConfig, sha, type Check, type Provenance, type ScenarioResult, type Split, type Suite } from './harness.js';
 
 // Bump when a check's logic changes, so a score change can be told apart from a model or prompt change.
 export const EVALUATOR_VERSION = '2'; // 2: draft_sender_facing
@@ -146,11 +146,7 @@ function toMessage(s: Scenario, i: number): MailMessage {
 
 export function inboxTriageSuite(db: pg.Pool, opts: { corpusFile?: URL | string } = {}): Suite {
   const { corpus, hash } = loadCorpus(opts.corpusFile);
-  const agent = async () => {
-    const { rows: [a] } = await db.query(`select model, instructions from ops.agents where id = 'inbox-triage'`);
-    if (!a) throw new Error('agent inbox-triage not found');
-    return a as { model: string; instructions: string };
-  };
+  const agent = () => agentConfig(db, 'inbox-triage');
   return {
     name: 'inbox-triage',
     labels: CATEGORIES,

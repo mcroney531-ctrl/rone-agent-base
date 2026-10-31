@@ -65,5 +65,13 @@ const md = renderDeeper(kept, idx);
 check('render: dated citations by name; inference marked "Likely"; suggestions uncited', /Jane asked for pricing by Friday\. _\(Email Oct 29, Jane Doe\)_/.test(md)
   && /SOW Monday\. _\(Email Oct 28, you\)_/.test(md) && /- Likely: Pricing is likely still open\./.test(md) && /- Leave with a pricing decision\.$/m.test(md), md);
 
+{
+  const { enforceWordCap } = await import('../src/calendarPrep.js');
+  const long = (n: number, kind = 'suggestion') => ({ text: Array(n).fill('w').join(' '), kind, by: null, sources: [] }) as never;
+  const capped = enforceWordCap({ context: [long(80, 'gap'), long(60, 'gap')], outcome: [long(30)], questions: [long(30)], risks: [long(30)] }, 200);
+  const n = (['context', 'outcome', 'questions', 'risks'] as const).reduce((t, k) => t + capped[k].reduce((u, c) => u + c.text.split(' ').length, 0), 0);
+  check('word cap enforced: risks, then questions, then outcome are dropped first; context kept', n <= 200 && capped.context.length === 2 && capped.risks.length === 0 && capped.outcome.length === 1, { n, capped: Object.fromEntries(Object.entries(capped).map(([k, v]) => [k, v.length])) });
+}
+
 console.log(failures.length ? `\nFAILED: ${failures.length}` : '\nall retrieval checks passed');
 process.exit(failures.length ? 1 : 0);

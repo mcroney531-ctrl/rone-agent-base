@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { AttentionItemSchema } from '../src/compat.js';
+import { addDays, localDate, zonedTime } from '../src/localDay.js';
 import { EXTERNALS, LOG_DIR, all, freshDb, killAllWorkers, one, startWorker, waitFor, type Worker } from './lib.js';
 
 const PORT = 7870;
@@ -156,8 +157,10 @@ try {
   check('the Gmail capability module has no send/trash/delete/archive path at all', !/\/send|\/trash|removeLabelIds|method: 'DELETE'|batchModify/.test(src.replace(/^\s*\/\/.*$/gm, '')));
 
   // ---- genericity: two producers, one inbox, one health model ----
+  const tomorrowAt = (hhmm: string) => zonedTime(addDays(localDate(new Date(), 'America/New_York'), 1), hhmm, 'America/New_York').toISOString();
   await fetch(`${EXTERNALS}/google/admin/events`, { method: 'POST', body: JSON.stringify([
-    { id: 'ext1', summary: 'Acme pricing review', status: 'confirmed', start: { dateTime: new Date(Date.now() + 26 * 3600_000).toISOString() }, end: { dateTime: new Date(Date.now() + 27 * 3600_000).toISOString() },
+    // Noon TOMORROW in the agent's zone (not "now + 26h", which is the day after tomorrow when run late in the evening ET).
+    { id: 'ext1', summary: 'Acme pricing review', status: 'confirmed', start: { dateTime: tomorrowAt('12:00') }, end: { dateTime: tomorrowAt('13:00') },
       attendees: [{ email: 'rone@example.com', self: true }, { email: 'jane@acme.com' }], description: 'Deck: https://docs.google.com/presentation/d/abc' },
   ]) });
   const cp = await call('POST', '/agents/calendar-prep/run', { requestId: 'cp-1' });

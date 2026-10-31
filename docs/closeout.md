@@ -33,6 +33,18 @@ Chosen to stress what Calendar Prep doesn't: frequent runs (every 20 min), a new
 - **Shared connection, per-agent scopes:** `agent_connections.scopes`. An active Google connection without Gmail blocks only Inbox Triage (one Reconnect item naming it), Calendar Prep keeps running. Blocked agents now skip scheduled occurrences (`last_skip_reason = 'blocked'`) instead of failing every tick; manual runs still fail loudly.
 - **Genericity (the #1a test):** `test-inbox-triage` runs both producers and checks one Needs You list with one item shape, one health model (pause one, the other stays healthy) and pause/409 working unchanged for the new producer.
 
+### Producer #3: Follow-up Tracker (V1: waiting on others)
+
+Chosen to stress what the first two didn't: per-item timers that outlive a run, cross-producer input, and owner input beyond approve/reject. V1 tracks only "waiting on them"; the owner's own promises (V1.1) need a much stricter evidence rule.
+
+- **Durable state is rows, not sleeping workflows.** `ops.follow_up_items` (status waiting/due/closed, due_at, snoozed_until, last_owner_message_at, source_evidence). The agent runs twice an hour as a short workflow: judge new sent mail → open/re-arm items → close replied ones → surface due ones. A deploy never strands a waiting timer, and cancellation is an UPDATE.
+- **Detection:** Claude judges each new sent message once (`ops.follow_up_scanned`): waiting_on_them / owner_promise (recorded, not tracked) / none. A message that both promises and asks is waiting_on_them. Skipped deterministically: mail only to me, only no-reply recipients.
+- **Due:** 3 business days after the owner's message, 9 AM local; an explicit "reply/deliver by" date in the message wins (due the business day after it).
+- **Replies close items before they come due,** two ways: Inbox Triage's output contract `ops.thread_activity` ("inbound mail observed in thread X"; the tracker never reads Triage's own tables), and a thread read at due time (catches replies Triage never saw, and re-arms when the owner already wrote again).
+- **The due item is the reminder:** Needs You shows "Still waiting on Jane · Last message: Oct 28 · pricing approval" with **Draft nudge** (a short workflow → a gmail.draft ACTION, approval required, never sent; the item waits 2 more business days), **Snooze** (Tomorrow / In 3 days / Next week / Pick a date: the first action with an input, `choices` on the action, POSTed as `choice`), **Not needed** (closes it).
+- **Named dates:** a date anchors the timer only when the message asks them to reply/deliver by it; a meeting date, the owner's own deadline or "I'm out until Friday" never does (critical in the eval).
+- **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, no false date anchor, nudges are sender-facing, add no facts, ≤1 placeholder).
+
 ### Calendar Prep retrieval (V1)
 
 Calendar Prep used to see only the invite. Now it also knows what is already known about the meeting's people, from grants the owner already gave (no new scopes):
@@ -40,6 +52,7 @@ Calendar Prep used to see only the invite. Now it also knows what is already kno
 - **Sources** (`src/retrieval.ts`): past meetings sharing an attendee (primary calendar, 90 days; all counted, latest 5 kept), email threads with the attendees (Gmail, 30 days, top 3 threads × 2 messages × ~600 chars), earlier briefs for the same series or title (60 days, with "not useful" feedback). Structured, with a source id on everything (`m1`, `t1.2`, `b1`, `ev`).
 - **Split:** the nightly ranking gets *signals* (met-before count and recency, thread subject, whether someone is waiting on the owner, one 160-char excerpt). It may change what is picked; it appears in "why" only when it materially changes why the meeting matters. "Prepare more" gets the full sources.
 - **Claims are checked, not trusted.** Deeper prep returns claims with a kind (fact, request, commitment, inference, gap = what no source shows, suggestion) and source ids. Code drops any fact/request/commitment without a real source, and any "the owner committed" that doesn't cite an email the owner wrote (a request made of the owner is never the owner's commitment). Inferences render as "Likely: …"; citations render as dated labels ("Email Oct 29, Jane Doe", "Met Oct 14").
+- **Length is enforced, not requested:** the prompt asks for ≤180 words; code trims the least essential claims (risks, then questions, then outcome) to a hard 200. Found by the eval: the model once wrote 207.
 - **Identity by address only.** People are matched by email address, never display name: a namesake at another address is never pulled in.
 - **Degrade, never block.** Each source fails on its own (recorded, skipped). Gmail is optional for Calendar Prep: without the scope the email source is `no_access`; its required scope stays Calendar. With every source gone, deeper prep still works from the invite.
 - **Read-only, bounded, untrusted.** Calendar Prep uses only Gmail's read functions (`recentMailWith`, `getMessage`); email text is data, never instructions. Nothing retrieved is stored beyond the rendered brief text (and DBOS's own step checkpoints, as for Inbox Triage's fetched mail).
