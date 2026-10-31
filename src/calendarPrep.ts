@@ -552,7 +552,7 @@ export function deeperPrompt(i: DeeperInput): string {
   const unavailable = Object.entries(i.context?.status ?? {}).filter(([, v]) => v === 'failed' || v === 'no_access').map(([k]) => k);
   return [
     '<deeper>Prepare me properly for this one meeting. Return claims in four sections: context, outcome (what I want out of it),',
-    'questions (to ask), risks (decisions/risks). Under 200 words in total; short claims; do not repeat the first-pass brief.',
+    'questions (to ask), risks (decisions/risks). At most 180 words in total; short claims; do not repeat the first-pass brief.',
     'Each claim has a kind and the ids of the sources it rests on (ev = the invite; m1… past meetings; t1.2 = a message in',
     'thread t1; t1 = the thread; b1… earlier briefs):',
     '- fact: something a source states. request: someone asked someone for something (by = owner if the OWNER asked, other',
@@ -573,12 +573,24 @@ export function deeperPrompt(i: DeeperInput): string {
   ].filter(Boolean).join('\n');
 }
 
-/** The deeper-prep judgment: one model call, checked and rendered. The workflow and the eval both call this. */
+export const DEEPER_WORD_CAP = 200;
+const claimWords = (d: Deeper) => (['context', 'outcome', 'questions', 'risks'] as const).reduce((t, k) => t + d[k].reduce((u, c) => u + c.text.split(/\s+/).filter(Boolean).length, 0), 0);
+/** The cap is enforced, not requested: drop claims from the least essential end (risks, questions, outcome) until it fits. */
+export function enforceWordCap(d: Deeper, cap = DEEPER_WORD_CAP): Deeper {
+  const out = { context: [...d.context], outcome: [...d.outcome], questions: [...d.questions], risks: [...d.risks] };
+  for (const k of ['risks', 'questions', 'outcome', 'context'] as const) {
+    while (claimWords(out) > cap && out[k].length > (k === 'context' ? 1 : 0)) out[k].pop();
+  }
+  return out;
+}
+
+/** The deeper-prep judgment: one model call, checked, capped and rendered. The workflow and the eval both call this. */
 export async function deeperBrief(model: LanguageModel, system: string, input: DeeperInput) {
   const result = await generateText({ model, system, prompt: deeperPrompt(input), output: Output.object({ schema: DeeperSchema, name: 'deeper_prep' }) });
   const idx = sourceIndex(input.context);
-  const { kept, problems } = checkClaims(result.output, idx);
-  return { raw: result.output, kept, problems, markdown: renderDeeper(kept, idx) };
+  const { kept: checked, problems } = checkClaims(result.output, idx);
+  const kept = enforceWordCap(checked);
+  return { raw: result.output, rawWords: claimWords(result.output), kept, keptWords: claimWords(kept), problems, markdown: renderDeeper(kept, idx) };
 }
 
 async function deeperPrepBody(briefId: string, eventId: string) {
