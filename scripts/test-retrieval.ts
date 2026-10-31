@@ -54,13 +54,13 @@ const c = (text: string, kind: string, sources: string[], by: string | null = nu
 const { kept, problems } = checkClaims({
   context: [c('Jane asked for pricing by Friday.', 'request', ['t1.1'], 'other'), c('Met Oct 14.', 'fact', ['m1']), c('Budget is 50k.', 'fact', []),
     c('Owner promised pricing Friday.', 'commitment', ['t1.1'], 'owner'), c('Owner will send the SOW Monday.', 'commitment', ['t1.2'], 'owner'),
-    c('Made up.', 'fact', ['t9.9'])],
+    c('Made up.', 'fact', ['t9.9']), c('No agenda in the invite.', 'gap', [])],
   outcome: [c('Leave with a pricing decision.', 'suggestion', [])], questions: [], risks: [c('Pricing is likely still open.', 'inference', ['t1.1'])],
 }, idx);
 check('checkClaims: unsourced facts, unknown ids and a request passed off as the owner\'s promise are dropped',
   JSON.stringify(problems.map((p) => p.problem)) === JSON.stringify(['unsourced', 'owner_commitment_unsupported', 'unknown_source']), problems);
-check('checkClaims: sourced facts/requests, the owner\'s real commitment, suggestions and inferences are kept',
-  kept.context.length === 3 && kept.outcome.length === 1 && kept.risks.length === 1, kept);
+check('checkClaims: sourced facts/requests, the owner\'s real commitment, gaps, suggestions and inferences are kept',
+  kept.context.length === 4 && kept.outcome.length === 1 && kept.risks.length === 1, kept);
 const md = renderDeeper(kept, idx);
 check('render: dated citations by name; inference marked "Likely"; suggestions uncited', /Jane asked for pricing by Friday\. _\(Email Oct 29, Jane Doe\)_/.test(md)
   && /SOW Monday\. _\(Email Oct 28, you\)_/.test(md) && /- Likely: Pricing is likely still open\./.test(md) && /- Leave with a pricing decision\.$/m.test(md), md);
