@@ -42,7 +42,17 @@ check('8 PM tick briefs the next LOCAL day (00:00Z is still the previous evening
 }
 
 // ---- end to end ----
-const DATE = '2026-11-01'; // deliberately the DST-change day
+// Deliberately a DST-change day (US fall back: first Sunday of November), and always in the future: Needs You
+// only shows briefs for today onward, so a fixed date silently breaks the attention checks once it passes.
+function nextFallBack(today: string): string {
+  for (let y = Number(today.slice(0, 4)); ; y++) {
+    const nov1 = new Date(Date.UTC(y, 10, 1));
+    const d = `${y}-11-${String(1 + ((7 - nov1.getUTCDay()) % 7)).padStart(2, '0')}`;
+    if (d > today) return d;
+  }
+}
+const DATE = nextFallBack(localDate(new Date(), TZ));
+const NEXT = addDays(DATE, 1);
 const at = (h: number, m = 0) => new Date(zonedMidnight(DATE, TZ).getTime() + (h * 60 + m) * 60_000).toISOString();
 const ev = (id: string, summary: string, h: number, mins: number, extra: Record<string, unknown> = {}) =>
   ({ id, summary, status: 'confirmed', start: { dateTime: at(h) }, end: { dateTime: at(h, mins) }, ...extra });
@@ -92,8 +102,8 @@ try {
   check('Run Now succeeds', run1.outcome === 'succeeded', run1);
   const b1 = (await w.http('GET', `/briefs/${DATE}`)).body;
   const ids = (b1.items ?? []).map((i: { eventId: string }) => i.eventId);
-  check('window is the local day: 04:00Z → 05:00Z next day (25h DST day)', new Date(b1.time_min).toISOString() === '2026-11-01T04:00:00.000Z'
-    && new Date(b1.time_max).toISOString() === '2026-11-02T05:00:00.000Z', [b1.time_min, b1.time_max]);
+  check('window is the local day: 04:00Z → 05:00Z next day (25h DST day)', new Date(b1.time_min).toISOString() === `${DATE}T04:00:00.000Z`
+    && new Date(b1.time_max).toISOString() === `${NEXT}T05:00:00.000Z`, [b1.time_min, b1.time_max]);
   check('hard filters dropped declined, focus, birthday; ranker saw the rest', b1.considered === 3
     && ['dec1', 'foc1', 'bday1'].every((id) => b1.filtered.some((f: { eventId: string }) => f.eventId === id)), { considered: b1.considered, filtered: b1.filtered });
   check('brief items = events worth prepping, in start order (internal standup left out)', JSON.stringify(ids) === JSON.stringify(['ext1', 'ext2']), ids);
@@ -106,7 +116,7 @@ try {
   const agentOps = (s1.appEvents[cal?.id] ?? []) as Record<string, any>[];
   const mirror = agentOps.find((e) => e.id === b1.mirror_event_id);
   check('mirror is one all-day Agent Ops event: "Prep brief · 2 items" + times + link', b1.mirror_status === 'written' && mirror
-    && mirror.summary === 'Prep brief · 2 items' && mirror.start.date === DATE && mirror.end.date === '2026-11-02'
+    && mirror.summary === 'Prep brief · 2 items' && mirror.start.date === DATE && mirror.end.date === NEXT
     && /Acme pricing review/.test(mirror.description) && mirror.description.includes(`Open full brief → https://ops.example/app/#/brief/${DATE}`), { b1, mirror });
   check('nothing was ever written to the primary calendar', s1.primaryWrites === 0, s1);
 
@@ -202,7 +212,7 @@ try {
     && /Mock deeper prep/.test(c2.deeper.content) && bU.dismissedCards.length === 0, c2);
 
   {
-    const D3 = '2026-11-05';
+    const D3 = addDays(DATE, 4);
     const ev3 = { id: 'nu1', summary: 'Vendor demo', status: 'confirmed', start: { dateTime: zonedTime(D3, '15:00', TZ).toISOString() },
       end: { dateTime: zonedTime(D3, '16:00', TZ).toISOString() }, attendees: [me, { email: 'sales@vendor.io' }], description: 'Deck: https://example.org/deck' };
     await fetch(`${EXTERNALS}/google/admin/events`, { method: 'POST', body: JSON.stringify([ev3]) });
@@ -224,7 +234,7 @@ try {
   }
 
   // ---- approval long after the proposal: the slot is re-checked when the action executes ----
-  const D2 = '2026-11-03';
+  const D2 = addDays(DATE, 2);
   const at2 = (hhmm: string) => zonedTime(D2, hhmm, TZ).toISOString();
   const ev2 = (id: string, summary: string, from: string, to: string, extra: Record<string, unknown> = {}) =>
     ({ id, summary, status: 'confirmed', start: { dateTime: at2(from) }, end: { dateTime: at2(to) }, ...extra });
