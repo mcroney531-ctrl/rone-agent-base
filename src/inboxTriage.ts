@@ -1,6 +1,6 @@
-// Inbox Triage (handler 'inbox_triage'), producer #2: every 20 minutes, triage new inbox mail.
+// Inbox Triage (handler 'inbox_triage'), producer #2: every 20 minutes (and on Gmail push), triage new inbox mail.
 //   intake (Gmail history cursor; 24h bootstrap) → queue new message IDs as 'pending' (same transaction as the
-//   cursor) → take the oldest pending batch → fetch → deterministic features → Claude classifies → save →
+//   cursor) → claim the oldest pending batch (overlapping runs get disjoint batches) → fetch → deterministic features → Claude classifies → save →
 //   propose ACTIONS: an Agent Ops/* label (low risk: auto-approved by policy) and, for mail that needs a reply,
 //   a draft reply (medium: always needs the owner). Nothing is ever sent (see src/connections/gmail.ts).
 // Same replay rules as workflows.ts: everything that touches the outside world is a step; the code between
@@ -13,6 +13,7 @@ import { agentModel } from './model.js';
 import { OpsError } from './errors.js';
 import { AGENT_OPS_LABEL_PREFIX, getMessage, inboxAddedSince, mailboxHistoryId, recentInboxIds, type MailMessage } from './connections/gmail.js';
 import { insertAction, type AgentRow, type Trigger } from './workflows.js';
+import { maintainWatch } from './ingress.js';
 
 const CURSOR_KEY = 'gmail.historyId';
 const BOOTSTRAP_HOURS = 24;
@@ -166,7 +167,9 @@ async function queueAndAdvance(agentId: string, got: Intake, workflowId: string)
       `insert into ops.inbox_items (agent_id, message_id) select $1, unnest($2::text[]) on conflict do nothing`, [agentId, got.ids]);
     await c.query(
       `insert into ops.state (agent_id, key, value, source_workflow_id) values ($1, $2, $3, $4)
-       on conflict (agent_id, key) do update set value = excluded.value, source_workflow_id = excluded.source_workflow_id, updated_at = now()`,
+       on conflict (agent_id, key) do update set value = excluded.value, source_workflow_id = excluded.source_workflow_id, updated_at = now()
+       -- Monotonic: an overlapping run that read an older cursor never moves it back.
+       where (ops.state.value->>'historyId')::numeric < (excluded.value->>'historyId')::numeric`,
       [agentId, CURSOR_KEY, { historyId: got.historyId }, workflowId]);
     await c.query('commit');
     return rowCount ?? 0;
@@ -227,13 +230,147 @@ async function proposeActions(agent: AgentRow, ctx: Ctx, workflowId: string, don
 
 // ---------- the run ----------
 
-export async function inboxTriageRun(agent: AgentRow, _trigger: Trigger, workflowId: string): Promise<{ text: string; proposed: number }> {
+// ---------- claims + proposals (push-ingress patch) ----------
+// With push, runs overlap (a push run, the schedule, Run now). Claims make that safe: each run claims its
+// batch atomically (FOR UPDATE SKIP LOCKED), so two runs never triage the same message. The triage and the
+// actions it decided on are written in ONE transaction (proposals); inserting them into ops.actions is a
+// separate step keyed per message, so a crash between the two is repaired without a second model call.
+
+type Proposal = { action: string; target: string; payload: Record<string, unknown>; idempotencyKey: string };
+
+function proposalsFor(agentId: string, connectionId: string, t: Triaged): Proposal[] {
+  if (t.source !== 'model') return [];
+  // Label: low risk → the agent's risk_threshold policy approves and executes it without the owner.
+  const out: Proposal[] = [{
+    action: 'gmail.label', target: t.m.id,
+    payload: { connectionId, messageId: t.m.id, label: LABELS[t.category], subject: t.m.subject, from: t.m.from },
+    idempotencyKey: `${agentId}:gmail.label:${t.m.id}`,
+  }];
+  if (t.category === 'needs_reply' && t.draft) {
+    out.push({
+      action: 'gmail.draft', target: t.m.id,
+      payload: {
+        connectionId, messageId: t.m.id, threadId: t.m.threadId,
+        to: t.m.replyTo ?? t.m.from, from: t.m.from, fromName: t.m.fromName, subject: t.m.subject,
+        summary: t.summary, draft: t.draft, ownerNote: t.ownerNote ?? null, inReplyTo: t.m.messageIdHeader, references: t.m.references,
+      },
+      idempotencyKey: `${agentId}:gmail.draft:${t.m.id}`,
+    });
+  }
+  return out;
+}
+
+// A workflow that can still make progress (running, recovering on another executor, or queued) owns its claims.
+const OWNER_DEAD = (col: string) => `not exists (select 1 from dbos.workflow_status w where w.workflow_uuid = ${col} and w.status in ('PENDING', 'ENQUEUED'))`;
+
+/**
+ * Repair what a run that died for good (cancelled, errored, out of recovery attempts) left behind:
+ * - claims it held go back to pending (it never saved them, so they have no side effects yet);
+ * - triages it saved but whose actions it never inserted get them inserted now, from the stored proposals.
+ * A run DBOS is still recovering is never touched: it resumes from its own checkpoints.
+ */
+async function repairDeadRuns(agent: AgentRow, workflowId: string): Promise<{ released: number; reproposed: number }> {
+  const { rowCount: released } = await pool.query(
+    `update ops.inbox_items set status = 'pending', claimed_by = null, claimed_at = null
+      where agent_id = $1 and status = 'claimed' and ${OWNER_DEAD('claimed_by')}`, [agent.id]);
+  const { rows } = await pool.query(
+    `select message_id, proposals from ops.inbox_items
+      where agent_id = $1 and status = 'triaged' and proposals is not null and proposed_at is null and ${OWNER_DEAD('source_workflow_id')}`,
+    [agent.id]);
+  for (const r of rows) await insertProposals(agent, String(r.message_id), r.proposals as Proposal[], workflowId);
+  return { released: released ?? 0, reproposed: rows.length };
+}
+
+async function insertProposals(agent: AgentRow, messageId: string, proposals: Proposal[], workflowId: string): Promise<number> {
+  // Keyed per message (idempotency_key): a second insert of the same proposal is a no-op.
+  for (const p of proposals) await insertAction(agent, workflowId, p);
+  await pool.query(`update ops.inbox_items set proposed_at = now() where agent_id = $1 and message_id = $2`, [agent.id, messageId]);
+  return proposals.length;
+}
+
+async function claimBatch(agentId: string, workflowId: string): Promise<string[]> {
+  // Includes claims this workflow already holds, so a step retried after a lost checkpoint gets its batch back.
+  const { rows } = await pool.query(
+    `update ops.inbox_items i set status = 'claimed', claimed_by = $2, claimed_at = now()
+       from (select message_id from ops.inbox_items
+              where agent_id = $1 and (status = 'pending' or (status = 'claimed' and claimed_by = $2))
+              order by created_at, message_id limit $3 for update skip locked) pick
+      where i.agent_id = $1 and i.message_id = pick.message_id
+      returning i.message_id, i.created_at`,
+    [agentId, workflowId, BATCH]);
+  return rows.sort((a, b) => a.created_at - b.created_at || String(a.message_id).localeCompare(String(b.message_id))).map((r) => String(r.message_id));
+}
+
+async function saveClaimed(agentId: string, workflowId: string, triggeredBy: string, done: Triaged[], gone: string[], connectionId: string): Promise<void> {
+  const c = await pool.connect();
+  try {
+    await c.query('begin');
+    for (const t of done) {
+      // Shared output contract (ops.thread_activity): "inbound mail observed in this thread". Other producers
+      // (Follow-up Tracker closes items on a reply) read this, never ops.inbox_items.
+      await c.query(
+        `insert into ops.thread_activity (connection_id, thread_id, message_id, from_addr, at, recorded_by)
+         values ($1, $2, $3, $4, $5, $6) on conflict do nothing`,
+        [connectionId, t.m.threadId, t.m.id, t.m.fromAddr, t.m.receivedAt, agentId]);
+      const proposals = proposalsFor(agentId, connectionId, t);
+      await c.query(
+        `update ops.inbox_items set status = 'triaged', thread_id = $3, received_at = $4, from_addr = $5, from_name = $6, subject = $7,
+                can_reply = $8, category = $9, triage_source = $10, summary = $11, label = $12, source_workflow_id = $13, triaged_at = now(),
+                proposals = $14, proposed_at = case when $15 then now() end, triaged_by = $16, claimed_by = null, claimed_at = null
+          where agent_id = $1 and message_id = $2 and status = 'claimed' and claimed_by = $13`,
+        [agentId, t.m.id, t.m.threadId, t.m.receivedAt, t.m.fromAddr, t.m.fromName, t.m.subject, t.f.canReply,
+          t.category, t.source, t.summary, t.source === 'model' ? LABELS[t.category] : null, workflowId,
+          JSON.stringify(proposals), proposals.length === 0, triggeredBy]);
+    }
+    if (gone.length) await c.query(`delete from ops.inbox_items where agent_id = $1 and message_id = any($2::text[]) and status = 'claimed' and claimed_by = $3`, [agentId, gone, workflowId]);
+    await c.query('commit');
+  } catch (e) {
+    await c.query('rollback').catch(() => undefined);
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
+async function proposeSaved(agent: AgentRow, workflowId: string): Promise<number> {
+  const { rows } = await pool.query(
+    `select message_id, proposals from ops.inbox_items
+      where agent_id = $1 and source_workflow_id = $2 and proposals is not null and proposed_at is null order by message_id`,
+    [agent.id, workflowId]);
+  let n = 0;
+  for (const r of rows) n += await insertProposals(agent, String(r.message_id), r.proposals as Proposal[], workflowId);
+  return n;
+}
+
+// Crash points for the failure tests: exit the worker right after the named step commits (before its checkpoint
+// matters), so a test can prove the dead run is repaired with no duplicate side effects.
+function crashPoint(name: string) {
+  if (process.env.TRIAGE_CRASH_AFTER === name) {
+    console.log(`[triage] TRIAGE_CRASH_AFTER=${name}: exiting`);
+    process.exit(1);
+  }
+}
+
+export async function inboxTriageRun(agent: AgentRow, trigger: Trigger, workflowId: string): Promise<{ text: string; proposed: number }> {
   const ctx = await DBOS.runStep(() => triageContext(agent), { name: 'triageContext' });
+  // Push ingress: claims instead of a plain read of the pending batch, and watch upkeep on scheduled and
+  // manual runs (Run now is how the owner retries a failed renewal; push runs never touch the watch).
+  // Patched, so a run in flight across the deploy replays the old step sequence unchanged.
+  const claims = await DBOS.patch('triage-claims');
+  let watch = '';
+  if (claims && (trigger.type === 'schedule' || trigger.type === 'manual')) {
+    watch = await DBOS.runStep(() => maintainWatch(agent.id, ctx.connectionId), { name: 'maintainWatch' });
+  }
   const got = await DBOS.runStep(() => intake(ctx), { name: 'gmailIntake', retriesAllowed: true, maxAttempts: 3, intervalSeconds: 2, backoffRate: 2 });
   const queued = await DBOS.runStep(() => queueAndAdvance(agent.id, got, workflowId), { name: 'queueAndAdvance' });
-  const batch = await DBOS.runStep(async () => (await pool.query(
-    `select message_id from ops.inbox_items where agent_id = $1 and status = 'pending' order by created_at, message_id limit $2`,
-    [agent.id, BATCH])).rows.map((r) => r.message_id as string), { name: 'takeBatch' });
+  let repaired = { released: 0, reproposed: 0 };
+  if (claims) repaired = await DBOS.runStep(() => repairDeadRuns(agent, workflowId), { name: 'repairDeadRuns' });
+  const batch = claims
+    ? await DBOS.runStep(() => claimBatch(agent.id, workflowId), { name: 'claimBatch' })
+    : await DBOS.runStep(async () => (await pool.query(
+      `select message_id from ops.inbox_items where agent_id = $1 and status = 'pending' order by created_at, message_id limit $2`,
+      [agent.id, BATCH])).rows.map((r) => r.message_id as string), { name: 'takeBatch' });
+  if (claims) crashPoint('claimBatch');
 
   const fetched = await DBOS.runStep(async () => {
     const out: (MailMessage | null)[] = [];
@@ -258,9 +395,16 @@ export async function inboxTriageRun(agent: AgentRow, _trigger: Trigger, workflo
     for (const { f, m } of forModel) done.push({ f, m, ...out.get(f.ref)!, source: 'model' });
   }
 
-  await DBOS.runStep(() => saveTriage(agent.id, workflowId, done, gone, ctx.connectionId), { name: 'saveTriage' });
-  const proposed = await DBOS.runStep(() => proposeActions(agent, ctx, workflowId, done), { name: 'proposeActions' });
+  let proposed: number;
+  if (claims) {
+    await DBOS.runStep(() => saveClaimed(agent.id, workflowId, trigger.type, done, gone, ctx.connectionId), { name: 'saveTriage' });
+    crashPoint('saveTriage');
+    proposed = await DBOS.runStep(() => proposeSaved(agent, workflowId), { name: 'proposeActions' });
+  } else {
+    await DBOS.runStep(() => saveTriage(agent.id, workflowId, done, gone, ctx.connectionId), { name: 'saveTriage' });
+    proposed = await DBOS.runStep(() => proposeActions(agent, ctx, workflowId, done), { name: 'proposeActions' });
+  }
   const counts = Object.fromEntries(CATEGORIES.map((c) => [c, done.filter((d) => d.category === c).length]));
-  return { text: `${got.mode}: ${queued} new, triaged ${done.length} (${JSON.stringify(counts)}), ${proposed} actions`, proposed };
+  const extra = [watch, repaired.released || repaired.reproposed ? `repaired ${repaired.released} claims, ${repaired.reproposed} proposals` : ''].filter(Boolean);
+  return { text: `${got.mode}: ${queued} new, triaged ${done.length} (${JSON.stringify(counts)}), ${proposed} actions${extra.length ? `; ${extra.join('; ')}` : ''}`, proposed };
 }
-

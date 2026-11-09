@@ -21,7 +21,7 @@ export const EXECUTOR_QUEUE = 'executor';
 export const AGENT_QUEUE = 'agent_runs';
 
 // forDate (YYYY-MM-DD): Run Now for a specific local day; only date-scoped handlers read it.
-export type Trigger = { type: 'schedule' | 'manual' | 'webhook' | 'calendar'; sourceEvent: string; forDate?: string };
+export type Trigger = { type: 'schedule' | 'manual' | 'webhook' | 'calendar' | 'push'; sourceEvent: string; forDate?: string };
 
 export type AgentRow = {
   id: string;

@@ -55,7 +55,12 @@ function scriptedMock() {
       const stop = (text: string) => ({
         content: [{ type: 'text' as const, text }], finishReason: { unified: 'stop' as const, raw: 'end_turn' }, usage, warnings: [],
       });
-      if (options.responseFormat?.type === 'json' && promptText.includes('<emails>')) return stop(JSON.stringify(mockTriage(promptText)));
+      if (options.responseFormat?.type === 'json' && promptText.includes('<emails>')) {
+        const out = mockTriage(promptText);
+        // Which messages each paid triage call saw: the claims test proves no message is classified twice.
+        if (process.env.MOCK_TRIAGE_LOG) fs.appendFileSync(process.env.MOCK_TRIAGE_LOG, `${DBOS.workflowID}\t${out.items.map((i) => i.ref).join(',')}\n`);
+        return stop(JSON.stringify(out));
+      }
       if (options.responseFormat?.type === 'json' && promptText.includes('<sent>')) return stop(JSON.stringify(mockDetect(promptText)));
       if (options.responseFormat?.type === 'json' && promptText.includes('<nudge>')) return stop(JSON.stringify({ draft: 'Just checking in on this when you have a moment.', ownerNote: null }));
       if (options.responseFormat?.type === 'json' && promptText.includes('<deeper>')) return stop(JSON.stringify(mockDeeper(promptText)));
