@@ -45,6 +45,58 @@ Chosen to stress what the first two didn't: per-item timers that outlive a run, 
 - **Named dates:** a date anchors the timer only when the message asks them to reply/deliver by it; a meeting date, the owner's own deadline or "I'm out until Friday" never does (critical in the eval).
 - **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, no false date anchor, nudges are sender-facing, add no facts, ≤1 placeholder).
 
+### External event ingress: Gmail push (V1)
+
+The base's first event from outside: a real provider pushes, we turn it into durable work. **A push is a wake-up signal, not a processing path.** The webhook never reads or interprets mail. It records the event and starts the existing Inbox Triage run, which reads from its own history cursor. The 20-minute schedule stays as the recovery path: Google may delay or drop a notification.
+
+- **Path:** Gmail `users.watch` (INBOX only) → Pub/Sub topic → push subscription → `POST /ingress/gmail` (`src/ingress.ts`).
+- **Authentication:** Pub/Sub's Google-signed OIDC token. RS256 against Google's JWKS, issuer accounts.google.com, our audience, our push service account (verified). Anything else gets a 401 and records nothing. No app session and no new secret: the audience and service-account email aren't secret.
+- **One canonical row per event:** `ops.ingress_events`, unique on (source, Pub/Sub messageId).
+  - A redelivery bumps `delivery_count`; it never adds a row.
+  - State goes `received → started | skipped | ignored`.
+  - The wake uses a deterministic workflow ID, `push-<agent>-<messageId>`, so a retried wake maps onto the same run.
+- **Ack only after the work is durable:**
+  - 2xx goes out only once the run is started (or the event is deliberately skipped or ignored).
+  - If the row is committed but the wake fails, the row stays `received`. Pub/Sub's redelivery then retries the wake instead of being acked as a duplicate.
+  - An unparseable payload, or a mailbox no agent watches, is acked as `ignored` (retrying can't fix it).
+  - A paused or blocked agent is `skipped`; the schedule handles it once unblocked.
+- **Overlapping runs are now safe (claims):**
+  - Push makes push, schedule and manual runs overlap. Each run claims its batch atomically (`pending → claimed`, `FOR UPDATE SKIP LOCKED`), so no message is classified twice. This also fixes the old manual+schedule overlap.
+  - The history cursor is monotonic.
+- **Crash/reclaim:**
+  - The triage and the actions it decided on (`proposals`) are saved in one transaction. Inserting them into `ops.actions` is a separate step, keyed per message.
+  - A run DBOS is still recovering keeps its claims and resumes from its checkpoints.
+  - A run that died for good (cancelled, errored, out of recovery attempts) is repaired by the next run: its claims go back to pending (it had no side effects yet), and saved-but-unproposed triages get their actions from the stored proposals. No second model call, no reclassification, no duplicate label, draft or action.
+  - All of this is behind `DBOS.patch('triage-claims')`.
+- **Watch lifecycle:**
+  - Scheduled and manual runs renew the watch when there is none, it's a day old, it expires within 48h, the topic changed, or the last attempt failed. Push runs never touch it.
+  - State is kept in `ops.state 'gmail.watch'`.
+  - A failed renewal never fails triage. It shows at once in Needs You: **Instant mail detection is off** (Retry now = a manual run). An expired watch shows the same way.
+- **Push health** (`ops.mail_push_health`):
+  - push state;
+  - pushes and redeliveries (24h);
+  - push latency (p50/max, arrival → triaged);
+  - **misses**: mail the schedule caught more than 2 minutes late, with the watch live and no push in between.
+  One miss is expected (Google drops some). Misses on **2+ separate scheduled runs in 24h** raise **Instant mail detection is missing mail**.
+- **Push off by default:** without `GMAIL_PUSH_TOPIC`, `PUSH_OIDC_AUDIENCE` and `PUSH_OIDC_EMAIL`, the route answers 404 and any watch state is cleared. Local, CI and eval runs behave as before.
+- **Not in V1 (scope guard):**
+  - per-message processing in the webhook;
+  - debounce or batching;
+  - push for the Follow-up Tracker (triage now writes `thread_activity` sooner) or Calendar;
+  - a generic ingress framework;
+  - `users.stop` (there is no disconnect flow yet).
+- **Tests:** `test-gmail-push`, 40 checks in CI, against a fake Pub/Sub that signs real RS256 tokens:
+  - OIDC rejections;
+  - wake;
+  - duplicate delivery;
+  - recorded-but-not-woken recovery;
+  - redelivery after the worker was down;
+  - three overlapping runs;
+  - crash after claim or after save, resumed by DBOS or dead for good;
+  - renewal failure, Retry now, expiry;
+  - one miss vs. two.
+- **Setup:** `docs/gmail-push.md`.
+
 ### Calendar Prep retrieval (V1)
 
 Calendar Prep used to see only the invite. Now it also knows what is already known about the meeting's people, from grants the owner already gave (no new scopes):

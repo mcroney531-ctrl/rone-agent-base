@@ -108,6 +108,57 @@ left join last_finished lf on lf.agent_id = a.id
 left join blocked b on b.agent_id = a.id
 where a.enabled;
 
+-- Gmail push health, per Inbox Triage agent with a watch (src/ingress.ts). push_state:
+--   on       watch live and the last renewal succeeded
+--   failing  the last renewal failed (triage continues on the schedule)
+--   expired  the watch lapsed
+-- A "miss" is a message the schedule picked up more than 2 minutes after it arrived, while the watch was
+-- live, with no push received in between: push should have woken triage and didn't. Google may delay or
+-- drop a notification now and then, so a single miss is normal; misses on 2+ separate scheduled runs in
+-- 24h mean push is probably broken even though the watch looks healthy.
+create or replace view ops.mail_push_health as
+with w as (
+  select s.agent_id, s.value->>'topic' as topic, (s.value->>'expiration')::timestamptz as expiration,
+         (s.value->>'renewedAt')::timestamptz as renewed_at, (s.value->>'since')::timestamptz as since,
+         s.value->>'lastError' as last_error, (s.value->>'lastErrorAt')::timestamptz as last_error_at
+    from ops.state s where s.key = 'gmail.watch'
+), acct as (
+  select ac.agent_id, lower(c.account_label) as account
+    from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id where c.provider = 'google'
+), ev as (
+  select a.agent_id, max(e.first_received_at) as last_push_at,
+         count(*) filter (where e.first_received_at > now() - interval '24 hours') as pushes_24h,
+         coalesce(sum(e.delivery_count - 1) filter (where e.first_received_at > now() - interval '24 hours'), 0) as redeliveries_24h
+    from acct a join ops.ingress_events e on e.source = 'gmail' and e.account = a.account group by a.agent_id
+), lag as (
+  select i.agent_id,
+         count(*) filter (where i.triaged_by = 'push') as push_triaged_24h,
+         count(*) filter (where i.triaged_by = 'schedule') as schedule_triaged_24h,
+         percentile_cont(0.5) within group (order by extract(epoch from i.triaged_at - i.received_at)) filter (where i.triaged_by = 'push') as push_lag_p50_s,
+         max(extract(epoch from i.triaged_at - i.received_at)) filter (where i.triaged_by = 'push') as push_lag_max_s
+    from ops.inbox_items i where i.status = 'triaged' and i.triaged_at > now() - interval '24 hours' and i.received_at is not null
+   group by i.agent_id
+), miss as (
+  select i.agent_id, count(*) as missed_24h, count(distinct i.source_workflow_id) as missed_runs_24h, max(i.triaged_at) as last_miss_at
+    from ops.inbox_items i join w on w.agent_id = i.agent_id left join acct a on a.agent_id = i.agent_id
+   where i.status = 'triaged' and i.triaged_by = 'schedule' and i.triaged_at > now() - interval '24 hours'
+     and i.triaged_at - i.received_at > interval '2 minutes'
+     and w.since is not null and i.received_at > w.since
+     and not exists (select 1 from ops.ingress_events e where e.source = 'gmail' and e.account = a.account
+                       and e.first_received_at between i.received_at and i.triaged_at)
+   group by i.agent_id
+)
+select w.agent_id, w.topic,
+       case when w.last_error is not null then 'failing'
+            when w.expiration is null or w.expiration < now() then 'expired'
+            else 'on' end as push_state,
+       w.expiration, w.renewed_at, w.since, w.last_error, w.last_error_at,
+       ev.last_push_at, coalesce(ev.pushes_24h, 0)::int as pushes_24h, coalesce(ev.redeliveries_24h, 0)::int as redeliveries_24h,
+       coalesce(lag.push_triaged_24h, 0)::int as push_triaged_24h, coalesce(lag.schedule_triaged_24h, 0)::int as schedule_triaged_24h,
+       round(lag.push_lag_p50_s::numeric, 1) as push_lag_p50_s, round(lag.push_lag_max_s::numeric, 1) as push_lag_max_s,
+       coalesce(miss.missed_24h, 0)::int as missed_24h, coalesce(miss.missed_runs_24h, 0)::int as missed_runs_24h, miss.last_miss_at
+  from w left join ev on ev.agent_id = w.agent_id left join lag on lag.agent_id = w.agent_id left join miss on miss.agent_id = w.agent_id;
+
 create or replace view ops.attention_queue as
 select 'approval_needed' as kind, a.id::text as ref, a.agent_id, a.created_at as since,
        a.logical_action || ' → ' || a.target as detail
@@ -177,6 +228,16 @@ union all
 select 'follow_up_due', f.id::text, f.agent_id, f.surfaced_at,
        coalesce(f.counterpart_name, f.counterpart[1]) || ' · ' || coalesce(f.expects, f.subject, '')
   from ops.follow_up_items f where f.status = 'due'
+union all
+-- Gmail push: an objectively broken watch shows at once; inferred breakage (misses) only when repeated.
+select 'mail_push_off', h.agent_id, h.agent_id, coalesce(h.last_error_at, h.expiration),
+       case h.push_state when 'failing' then 'Renewing the Gmail watch failed: ' || h.last_error
+                         else 'The Gmail watch expired' end
+  from ops.mail_push_health h where h.push_state <> 'on'
+union all
+select 'mail_push_degraded', h.agent_id, h.agent_id, h.last_miss_at,
+       h.missed_24h || ' message(s) on ' || h.missed_runs_24h || ' scheduled runs in 24h arrived with no push'
+  from ops.mail_push_health h where h.push_state = 'on' and h.missed_runs_24h >= 2
 union all
 select 'executor_unreaped', e.executor_id, null, e.last_seen_at, 'stale heartbeat, not yet reaped — is any worker alive?'
   from ops.executors e where e.reaped_at is null and e.last_seen_at < now() - interval '2 minutes';

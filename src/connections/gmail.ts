@@ -30,6 +30,15 @@ async function gmail<T>(connectionId: string, method: 'GET' | 'POST', path: stri
   return (await res.json()) as T;
 }
 
+// ---------- push (watch) ----------
+// Ask Gmail to publish "INBOX changed" notifications to a Pub/Sub topic. A watch lasts ~7 days and must be
+// renewed (Google recommends daily); re-calling watch replaces the existing one. The notification carries
+// only {emailAddress, historyId}: it is a wake-up signal, Inbox Triage still reads from its own cursor.
+export async function watchInbox(connectionId: string, topicName: string): Promise<{ historyId: string; expiration: string }> {
+  const r = await gmail<{ historyId: string; expiration: string }>(connectionId, 'POST', '/watch', { topicName, labelIds: ['INBOX'], labelFilterBehavior: 'INCLUDE' });
+  return { historyId: String(r.historyId), expiration: new Date(Number(r.expiration)).toISOString() };
+}
+
 // ---------- intake ----------
 
 /** Current mailbox history ID: the cursor to resume from after a bootstrap read. */

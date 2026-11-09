@@ -19,6 +19,7 @@ import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors }
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
 import { listConnections } from './connections/store.js';
 import { assertServedClientCompatible, CLIENT_COMPAT_HEADER, outdatedClient } from './compat.js';
+import { handleGmailPush, pushConfig, verifyPushToken } from './ingress.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
   console.warn('[main] UNSAFE_SKIP_CONNECTION_GUARD=1 — connection-mode guard disabled (failure-suite only)');
@@ -66,6 +67,7 @@ await applySql('010_agent_pause.sql');
 await applySql('011_inbox_triage.sql');
 await applySql('012_evals.sql');
 await applySql('013_follow_up.sql');
+await applySql('014_push_ingress.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -187,6 +189,20 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/app/manifest.webmanifest') {
       return res.writeHead(200, { 'content-type': 'application/manifest+json' }).end(APP_MANIFEST);
+    }
+
+    // Gmail push (src/ingress.ts): authenticated by Pub/Sub's Google-signed OIDC token, not by an app session.
+    // A wake-up signal only; 2xx acknowledges, anything else makes Pub/Sub redeliver.
+    if (req.method === 'POST' && url.pathname === '/ingress/gmail') {
+      const cfg = pushConfig();
+      if (!cfg) return send(res, 404, { error: 'push ingress not configured' });
+      const v = await verifyPushToken(req.headers.authorization, cfg);
+      if (!v.ok) {
+        console.warn(`[ingress] rejected gmail push: ${v.reason}`);
+        return send(res, 401, { error: 'unauthorized' });
+      }
+      const out = await handleGmailPush(await readJson(req).catch(() => ({}))); // unparseable → acked as ignored
+      return res.writeHead(out.status).end();
     }
 
     // Compatibility contract (src/compat.ts): a phone-app call from a client too old for this API is refused

@@ -4,11 +4,14 @@
 //   GET  /stats    attempts vs unique committed effects (what the crash-window test measures)
 //   POST /faults   inject provider failures: {"failNext": 3, "status": 503}
 //   /google/*      fake Google OAuth + Calendar (consent, token, userinfo, calendars, events, revoke)
-//   /google/gmail/* fake Gmail (profile, messages, history, labels, drafts); every send/delete/trash attempt
+//   /google/gmail/* fake Gmail (profile, messages, history, labels, drafts, watch); every send/delete/trash attempt
 //                   is refused AND recorded, so tests can assert the system never tried
+//   /pubsub/*      fake Pub/Sub push: signs a Google-style OIDC token (RS256, keys at /pubsub/certs) and POSTs a
+//                   Gmail notification to an endpoint, like a push subscription does
 // Storage: Postgres (fake_provider schema) when FAKE_PROVIDER_DATABASE_URL is set, otherwise in memory —
 // deployed, it must not spend the Supabase session pooler's small connection budget.
 import http from 'node:http';
+import crypto from 'node:crypto';
 import pg from 'pg';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -260,9 +263,11 @@ const GM = {
   drafts: new Map<string, { id: string; messageId: string }>(),
   forbidden: [] as string[],
   seq: 0,
+  watch: { calls: 0, fail: 0 as number, topic: null as string | null, expiration: 0 },
 };
 function resetGmail() {
   GM.historyId = 1000; GM.minHistoryId = 1000; GM.messages.clear(); GM.history = []; GM.labels.clear(); GM.drafts.clear(); GM.forbidden = []; GM.seq = 0;
+  GM.watch = { calls: 0, fail: 0, topic: null, expiration: 0 };
 }
 const SYSTEM_LABELS = ['INBOX', 'UNREAD', 'DRAFT', 'SENT', 'TRASH', 'SPAM', 'CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
 const gmHeader = (m: GmMsg, n: string) => m.headers.find((h) => h.name.toLowerCase() === n.toLowerCase())?.value;
@@ -284,10 +289,14 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
     GM.minHistoryId = GM.historyId + 1;
     return send(res, 200, { minHistoryId: GM.minHistoryId }), true;
   }
+  if (p === '/google/admin/gmail/watch-fail' && req.method === 'POST') {
+    GM.watch.fail = Number(((await readBody(req)) as { status?: number })?.status ?? 0); // 0 = succeed
+    return send(res, 200, { fail: GM.watch.fail }), true;
+  }
   if (p === '/google/admin/gmail/state') {
     const labelName = (id: string) => GM.labels.get(id)?.name ?? id;
     return send(res, 200, {
-      historyId: GM.historyId, labels: [...GM.labels.values()], forbidden: GM.forbidden,
+      historyId: GM.historyId, labels: [...GM.labels.values()], forbidden: GM.forbidden, watch: GM.watch,
       messages: [...GM.messages.values()].map((m) => ({ id: m.id, threadId: m.threadId, labels: m.labelIds.map(labelName), subject: gmHeader(m, 'Subject') })),
       drafts: [...GM.drafts.values()].map((d) => {
         const m = GM.messages.get(d.messageId)!;
@@ -304,6 +313,14 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
   const r = /^\/google\/gmail\/v1\/users\/me(\/.*)$/.exec(p)?.[1] ?? '';
   const refuse = () => { GM.forbidden.push(`${req.method} ${r}`); return send(res, 403, { error: { code: 403, message: 'forbidden in this fake: Agent Ops must never do this' } }), true; };
 
+  if (r === '/watch' && req.method === 'POST') {
+    GM.watch.calls++;
+    if (GM.watch.fail) return send(res, GM.watch.fail, { error: { code: GM.watch.fail, message: 'watch failed (injected)' } }), true;
+    const b = (await readBody(req)) as { topicName?: string; labelIds?: string[] };
+    if (!b?.topicName) return send(res, 400, { error: { code: 400, message: 'topicName required' } }), true;
+    GM.watch.topic = b.topicName; GM.watch.expiration = Date.now() + 7 * 86400_000;
+    return send(res, 200, { historyId: String(GM.historyId), expiration: String(GM.watch.expiration) }), true;
+  }
   if (r === '/profile' && req.method === 'GET') return send(res, 200, { emailAddress: 'rone@example.com', historyId: String(GM.historyId) }), true;
   if (r === '/messages' && req.method === 'GET') {
     const q = u.searchParams.get('q') ?? '';
@@ -382,6 +399,40 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
   return refuse(); // send, drafts/send, delete, trash, batchModify, settings … none of it is ours to do
 }
 
+// ---------- fake Pub/Sub push ----------
+// One RSA key per process, published as a JWKS. Tokens carry the claims a real push subscription's OIDC
+// token does (iss accounts.google.com, aud, email, email_verified); tests can also forge bad ones.
+const PS_KEY = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const PS_KID = 'fake-pubsub-1';
+const b64u = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+function psToken(claims: Record<string, unknown>, opts: { alg?: string; wrongKey?: boolean } = {}): string {
+  const head = b64u({ alg: opts.alg ?? 'RS256', kid: PS_KID, typ: 'JWT' });
+  const body = b64u(claims);
+  const key = opts.wrongKey ? crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey : PS_KEY.privateKey;
+  return `${head}.${body}.${crypto.sign('RSA-SHA256', Buffer.from(`${head}.${body}`), key).toString('base64url')}`;
+}
+async function fakePubSub(req: http.IncomingMessage, res: http.ServerResponse, path: string) {
+  if (path === '/pubsub/certs') return send(res, 200, { keys: [{ ...PS_KEY.publicKey.export({ format: 'jwk' }), kid: PS_KID, alg: 'RS256', use: 'sig' }] });
+  // POST /pubsub/admin/push {endpoint, aud, email, emailAddress, historyId, messageId, token?: 'none'|'wrong-aud'|'wrong-email'|'bad-sig'|'expired'}
+  if (path === '/pubsub/admin/push' && req.method === 'POST') {
+    const b = (await readBody(req)) as Record<string, string>;
+    const now = Math.floor(Date.now() / 1000);
+    const claims = {
+      iss: 'https://accounts.google.com', aud: b.token === 'wrong-aud' ? 'https://elsewhere.example' : b.aud,
+      email: b.token === 'wrong-email' ? 'someone@else.iam.gserviceaccount.com' : b.email, email_verified: true,
+      iat: now, exp: b.token === 'expired' ? now - 3600 : now + 3600, sub: '1234',
+    };
+    const token = b.token === 'none' ? null : psToken(claims, { wrongKey: b.token === 'bad-sig' });
+    const data = b.raw ?? Buffer.from(JSON.stringify({ emailAddress: b.emailAddress, historyId: Number(b.historyId ?? 1) })).toString('base64');
+    const r = await fetch(b.endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ message: { data, messageId: b.messageId, publishTime: new Date().toISOString() }, subscription: 'projects/fake/subscriptions/gmail-push' }),
+    });
+    return send(res, 200, { status: r.status });
+  }
+  return send(res, 404, { error: 'not found' });
+}
+
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
@@ -399,6 +450,7 @@ http
       const reqUrl = new URL(req.url ?? '/', 'http://x');
       const path = reqUrl.pathname;
       if (path.startsWith('/google/') && (await fakeGoogle(req, res, reqUrl))) return;
+      if (path.startsWith('/pubsub/')) return await fakePubSub(req, res, path);
       // Fake push service: records encrypted Web Push deliveries; endpoint id 'gone' answers 410.
       if (path.startsWith('/push/')) {
         if (path === '/push/admin/received') return send(res, 200, PUSHES);

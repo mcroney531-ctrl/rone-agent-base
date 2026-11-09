@@ -98,6 +98,18 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
   queued_too_long: { severity: 'problem', title: () => 'Run waiting too long', actions: () => [A.dismiss] },
   no_executor_for_version: { severity: 'problem', title: () => 'No worker for this version', actions: () => [A.dismiss] },
   executor_unreaped: { severity: 'problem', title: () => 'Worker stopped responding', actions: () => [A.dismiss] },
+  // Gmail push (src/ingress.ts). Triage keeps running every 20 minutes either way; these say it's slower.
+  // Run now renews the watch (manual runs do); a later failure or new misses bring the item back.
+  mail_push_off: {
+    severity: 'problem', title: () => 'Instant mail detection is off',
+    summary: (r) => `${r.detail ?? ''}. New mail is still triaged every 20 minutes.`,
+    actions: () => [{ ...A.runNow, label: 'Retry now' }, A.dismiss],
+  },
+  mail_push_degraded: {
+    severity: 'problem', title: () => 'Instant mail detection is missing mail',
+    summary: (r) => `${r.detail ?? ''}. They were caught by the 20-minute check.`,
+    actions: () => [A.dismiss],
+  },
 };
 const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due']); // only resolving them clears them
 const FALLBACK = { severity: 'problem' as Severity, title: (r: Row) => humanize(r.kind), actions: () => [A.dismiss] };
