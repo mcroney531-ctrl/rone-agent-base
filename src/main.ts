@@ -20,6 +20,8 @@ import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensu
 import { listConnections } from './connections/store.js';
 import { assertServedClientCompatible, CLIENT_COMPAT_HEADER, outdatedClient } from './compat.js';
 import { handleGmailPush, pushConfig, verifyPushToken } from './ingress.js';
+import { addSource, getInterests, listSources, removeSource, setInterests, setSourcePaused } from './feedWatch.js';
+import { FeedError } from './connections/feed.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
   console.warn('[main] UNSAFE_SKIP_CONNECTION_GUARD=1 — connection-mode guard disabled (failure-suite only)');
@@ -68,6 +70,7 @@ await applySql('011_inbox_triage.sql');
 await applySql('012_evals.sql');
 await applySql('013_follow_up.sql');
 await applySql('014_push_ingress.sql');
+await applySql('015_feed_watch.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -230,6 +233,31 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/agents') return send(res, 200, await listAgents());
     // Pause/resume: POST /agents/:id/pause | /resume (idempotent).
+    // Research Watch sources (src/feedWatch.ts): the second connection type. Configuration, not workflows.
+    if (parts[0] === 'sources') {
+      if (req.method === 'GET' && parts.length === 1) return send(res, 200, { sources: await listSources(), interests: await getInterests() });
+      if (req.method === 'PUT' && parts[1] === 'interests' && parts.length === 2) {
+        const text = String((await readJson(req)).interests ?? '');
+        await setInterests(text);
+        return send(res, 200, { interests: await getInterests() });
+      }
+      if (req.method === 'POST' && parts.length === 1) {
+        const body = await readJson(req);
+        const backfill = Math.max(0, Math.min(20, Number(body.backfill ?? 0) || 0));
+        try {
+          return send(res, 201, await addSource(String(body.url ?? ''), { backfill, fresh: body.fresh === true }));
+        } catch (e) {
+          if (e instanceof FeedError) return send(res, 400, { error: `Couldn't add that source: ${e.message}` });
+          throw e;
+        }
+      }
+      const id = decodeURIComponent(parts[1] ?? '');
+      if (req.method === 'POST' && parts.length === 3 && (parts[2] === 'pause' || parts[2] === 'resume')) {
+        return (await setSourcePaused(id, parts[2] === 'pause')) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'no such source' });
+      }
+      if (req.method === 'DELETE' && parts.length === 2) return (await removeSource(id)) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'no such source' });
+      return send(res, 404, { error: 'not found' });
+    }
     if (req.method === 'POST' && parts[0] === 'agents' && parts[1] && (parts[2] === 'pause' || parts[2] === 'resume') && parts.length === 3) {
       const paused = parts[2] === 'pause';
       if (!(await setPaused(parts[1], paused, by))) return send(res, 404, { error: 'no such agent' });

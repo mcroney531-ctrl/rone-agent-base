@@ -195,7 +195,7 @@ select 'connection_problem', c.id, min(ac.agent_id), coalesce(c.last_checked_at,
        case c.status when 'reauth_required' then 'Reauthorization needed' else c.status end
          || coalesce(coalesce(' (' || c.account_label || ')', '') || ': ' || c.last_error, '')
   from ops.connections c left join ops.agent_connections ac on ac.connection_id = c.id
- where c.status not in ('active', 'pending')
+ where c.status not in ('active', 'pending') and c.paused_at is null and c.removed_at is null
  group by c.id, c.last_checked_at, c.updated_at, c.status, c.account_label, c.last_error
 union all
 -- An active connection that lacks a scope some agent needs (e.g. Gmail for Inbox Triage): only those
@@ -228,6 +228,13 @@ union all
 select 'follow_up_due', f.id::text, f.agent_id, f.surfaced_at,
        coalesce(f.counterpart_name, f.counterpart[1]) || ' · ' || coalesce(f.expects, f.subject, '')
   from ops.follow_up_items f where f.status = 'due'
+union all
+-- Research Watch: an item judged relevant for its CURRENT revision, surfaced (≤5 per source per run), unseen,
+-- from a source that is still watched.
+select 'feed_item', i.id::text, 'research-watch', i.surfaced_at, i.title
+  from ops.feed_items i join ops.connections c on c.id = i.connection_id
+ where i.relevant and i.processing_state = 'judged' and i.judged_revision = i.revision
+   and i.surfaced_at is not null and i.seen_at is null and c.removed_at is null and c.paused_at is null
 union all
 -- Gmail push: an objectively broken watch shows at once; inferred breakage (misses) only when repeated.
 select 'mail_push_off', h.agent_id, h.agent_id, coalesce(h.last_error_at, h.expiration),

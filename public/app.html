@@ -255,6 +255,11 @@ function actionButtons(item, after) {
     class: a.style ?? '',
     onclick: async (e) => {
       e.stopPropagation();
+      if (a.id === 'open' && a.url) {
+        // An external link (e.g. a feed item): open it, and record the open without leaving the app.
+        window.open(a.url, '_blank', 'noopener');
+        return send(a, e.currentTarget);
+      }
       if (a.id === 'open') {
         if (item.type === 'deeper_ready') return go(`#/brief/${enc(item.ref.split('/')[0])}`);
         return go(item.type.startsWith('brief') ? `#/brief/${enc(item.ref)}` : `#/item/${enc(item.type)}/${enc(item.ref)}`);
@@ -446,10 +451,45 @@ async function agents() {
           const r = await api(`/agents/${enc(a.id)}/${a.paused_at ? 'resume' : 'pause'}`, { method: 'POST' });
           toast(r.body.message ?? r.body.error ?? 'Done'); route();
         }) }, a.paused_at ? 'Resume' : 'Pause')) : null)),
+    await sourcesCard(),
     await notificationsCard(),
     h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
       h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await signOutHere(); route(); } }, 'Sign out')),
   );
+}
+
+// ---------- Research Watch sources (RSS/Atom feeds) and the interest profile ----------
+async function sourcesCard() {
+  const { body } = await api('/sources');
+  const act = (fn) => async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try { await fn(); } catch (err) { handleErr(err); }
+    btn.disabled = false;
+  };
+  const urlIn = h('input', { type: 'url', placeholder: 'https://example.com/feed.xml', style: 'width:100%' });
+  const interestsIn = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'What should Research Watch flag? e.g. AI agent tooling, durable workflows, Postgres.' });
+  interestsIn.value = body.interests ?? '';
+  const statusOf = (s) => (s.paused_at ? 'paused' : s.status === 'active' ? (s.failures ? `retrying (${s.failures})` : 'ok') : s.status);
+  return h('div', { class: 'card' },
+    h('div', { class: 'title' }, 'Research Watch sources'),
+    h('div', { class: 'muted' }, 'Interest profile (only you change it)'), interestsIn,
+    h('div', { class: 'actions' }, h('button', { onclick: act(async () => {
+      await api('/sources/interests', { method: 'PUT', body: { interests: interestsIn.value } }); toast('Saved');
+    }) }, 'Save profile')),
+    ...(body.sources ?? []).map((s) => h('div', { style: 'margin-top:12px' },
+      h('div', { class: 'row' }, h('span', {}, s.title), h('span', { class: 'pill' }, statusOf(s))),
+      h('div', { class: 'muted' }, s.url), s.last_error ? h('div', { class: 'muted' }, `Last error: ${s.last_error}`) : null,
+      h('div', { class: 'actions' },
+        h('button', { onclick: act(async () => { await api(`/sources/${enc(s.id)}/${s.paused_at ? 'resume' : 'pause'}`, { method: 'POST' }); route(); }) }, s.paused_at ? 'Resume' : 'Pause'),
+        h('button', { class: 'danger', onclick: act(async () => {
+          if (!confirm(`Stop watching "${s.title}"?`)) return;
+          await api(`/sources/${enc(s.id)}`, { method: 'DELETE' }); route();
+        }) }, 'Remove')))),
+    h('div', { class: 'muted', style: 'margin-top:12px' }, 'Add an RSS or Atom feed'), urlIn,
+    h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: act(async () => {
+      const r = await api('/sources', { method: 'POST', body: { url: urlIn.value.trim() } });
+      if (r.status === 201) { toast(`Watching ${r.body.title}`); route(); } else toast(r.body.error ?? 'Could not add it');
+    }) }, 'Add source')));
 }
 
 // ---------- push notifications (one subscription per device) ----------

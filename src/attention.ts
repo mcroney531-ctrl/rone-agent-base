@@ -8,11 +8,13 @@ import { pool } from './db.js';
 import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE } from './workflows.js';
 import { startGoogleAuth } from './connections/google.js';
 import { closeNotNeeded, followUpNudge, snoozeItem } from './followUp.js';
+import { recordFeedback, removeSource } from './feedWatch.js';
 
-export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed';
+export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed' | 'not_relevant' | 'remove_source';
 // choices: the action needs one more input (e.g. Snooze: how long). The app shows them and POSTs { choice }.
 export type ActionChoice = { id: string; label: string; input?: 'date' };
-export type ItemAction = { id: ActionId; label: string; style?: 'primary' | 'danger'; choices?: ActionChoice[] };
+// url: an external link the app opens in a new tab; it still POSTs the action so the open is recorded.
+export type ItemAction = { id: ActionId; label: string; style?: 'primary' | 'danger'; choices?: ActionChoice[]; url?: string };
 export type Severity = 'decision' | 'problem' | 'info';
 
 export type AttentionItem = {
@@ -40,6 +42,8 @@ const A = {
   nudge: { id: 'nudge', label: 'Draft nudge', style: 'primary' },
   snooze: { id: 'snooze', label: 'Snooze', choices: [{ id: '1d', label: 'Tomorrow' }, { id: '3d', label: 'In 3 days' }, { id: '1w', label: 'Next week' }, { id: 'date', label: 'Pick a date', input: 'date' }] },
   notNeeded: { id: 'not_needed', label: 'Not needed' },
+  notRelevant: { id: 'not_relevant', label: 'Not relevant' },
+  removeSource: { id: 'remove_source', label: 'Remove source', style: 'danger' },
 } satisfies Record<string, ItemAction>;
 
 const humanize = (id: string) => id.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_:.]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
@@ -82,8 +86,17 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
   deeper_ready: { severity: 'info', title: () => 'Deeper prep ready', actions: () => [A.open, A.dismiss] },
   connection_problem: {
     severity: 'problem',
-    title: () => 'Connection needs attention',
-    actions: (r) => (r.ref.startsWith('google:') ? [A.reauth] : []),
+    // A feed has no credential to re-consent: its fix is "try again" or "stop watching it".
+    title: (r) => (r.ref.startsWith('feed:') ? 'Source unavailable' : 'Connection needs attention'),
+    actions: (r) => (r.ref.startsWith('google:') ? [A.reauth] : r.ref.startsWith('feed:') ? [{ ...A.runNow, label: 'Retry now' }, A.removeSource] : []),
+  },
+  // Research Watch: a new or updated item judged relevant to the owner's interest profile.
+  feed_item: {
+    severity: 'info',
+    title: (r) => `${r.extra?.change_kind === 'changed' ? 'Updated' : 'New'} from ${r.extra?.source ?? 'a source'}: ${r.extra?.title ?? ''}`,
+    summary: (r) => [r.extra?.why, r.extra?.change_kind === 'changed' && r.extra?.prev_title && r.extra.prev_title !== r.extra.title ? `Was: “${r.extra.prev_title}”` : null]
+      .filter(Boolean).join('\n'),
+    actions: (r) => [{ ...A.open, label: 'Open', ...(r.extra?.link ? { url: String(r.extra.link) } : {}) }, A.notRelevant, { ...A.dismiss, label: 'Got it' }],
   },
   run_failed: { severity: 'problem', title: () => 'Run failed', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
   action_failed: {
@@ -149,7 +162,13 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
                 (select jsonb_build_object('counterpart', f.counterpart, 'counterpart_name', f.counterpart_name, 'subject', f.subject, 'expects', f.expects,
                          'last_owner_message_at', f.last_owner_message_at, 'due_at', f.due_at, 'explicit_date', f.explicit_date,
                          'evidence', f.source_evidence, 'nudges', f.nudges)
-                   from ops.follow_up_items f where f.id::text = q.ref) end as extra
+                   from ops.follow_up_items f where f.id::text = q.ref)
+              when q.kind = 'feed_item' then
+                (select jsonb_build_object('source', c.account_label, 'source_url', c.metadata->>'url', 'title', i.title, 'link', i.link,
+                         'why', i.why, 'change_kind', i.change_kind, 'prev_title', i.prev_title, 'prev_text', i.prev_text, 'text', left(i.text, 600),
+                         'published_at', i.published_at, 'revision', i.revision, 'first_seen_at', i.first_seen_at, 'last_changed_at', i.last_changed_at,
+                         'content_hash', i.content_hash, 'prev_hash', i.prev_hash, 'item_key', i.item_key)
+                   from ops.feed_items i join ops.connections c on c.id = i.connection_id where i.id::text = q.ref) end as extra
        from ops.attention_queue q
        left join ops.attention_acks k on k.kind = q.kind and k.ref = q.ref
       where (k.acked_at is null or q.since > k.acked_at)
@@ -182,6 +201,19 @@ export async function attentionDetail(kind: string, ref: string) {
     add('Subject', x.subject); add('For', x.expects); add('You wrote', x.evidence?.quote ? `“${x.evidence.quote}”` : null);
     add('Last message', fmtDay(x.last_owner_message_at)); add('Asked for by', x.explicit_date ? fmtDay(`${x.explicit_date}T12:00:00Z`) : null);
     if (x.nudges) add('Nudges so far', String(x.nudges));
+  }
+  if (kind === 'feed_item') {
+    // Provenance: exactly what this is and where it came from.
+    const x = row.extra ?? {};
+    add('Source', x.source); add('Feed', x.source_url); add('Link', x.link); add('Published', x.published_at ? fmtDay(x.published_at) : null);
+    add('Why it matters', x.why);
+    if (x.change_kind === 'changed') {
+      add('What changed', x.prev_title && x.prev_title !== x.title ? `Title: “${x.prev_title}” → “${x.title}”` : 'The text was edited');
+      add('Before', x.prev_text ? String(x.prev_text).slice(0, 400) : null);
+    }
+    add('Excerpt', x.text ? String(x.text).slice(0, 400) : null);
+    add('First seen', x.first_seen_at); if (x.change_kind === 'changed') add('Changed', x.last_changed_at);
+    add('Revision', String(x.revision)); add('Item id', x.item_key);
   }
   if (kind === 'approval_needed' || kind === 'action_failed' || kind === 'action_stuck') {
     const { rows: [a] } = await pool.query(`select * from ops.actions where id::text = $1`, [ref]);
@@ -243,6 +275,7 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
     }
     case 'dismiss': {
       if (DECISION_KINDS.has(kind)) return { ok: false, status: 400, message: 'This needs a decision, not a dismissal.' };
+      if (kind === 'feed_item') { await recordFeedback(ref, 'got_it'); return { ok: true, status: 200, message: 'Cleared.' }; }
       if (kind === 'brief_ready') await pool.query(`update ops.briefs set seen_at = coalesce(seen_at, now()) where id::text = $1`, [ref]);
       else if (kind === 'deeper_ready') await pool.query(`update ops.brief_deeper set seen_at = now() where brief_id::text || '/' || event_id = $1`, [ref]);
       else await pool.query(
@@ -259,7 +292,13 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
     case 'reauth':
       return { ok: true, status: 200, message: 'Opening Google…', redirect: await startGoogleAuth(ref) };
     case 'open':
+      if (kind === 'feed_item') await recordFeedback(ref, 'opened');
       return { ok: true, status: 200, message: '' };
+    case 'not_relevant':
+      // Recorded as feedback only: it never changes the interest profile on its own.
+      return (await recordFeedback(ref, 'not_relevant')) ? { ok: true, status: 200, message: 'Noted: not relevant.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
+    case 'remove_source':
+      return (await removeSource(ref)) ? { ok: true, status: 200, message: 'Source removed.' } : { ok: false, status: 409, message: 'Already removed.' };
     case 'snooze': {
       if (!choice) return { ok: false, status: 400, message: 'Choose when to be reminded.' };
       const r = await snoozeItem(ref, choice, by);

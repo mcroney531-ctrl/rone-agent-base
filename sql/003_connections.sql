@@ -7,9 +7,11 @@ alter table ops.connections
   add column if not exists metadata jsonb not null default '{}'; -- provider facts, e.g. {"agentOpsCalendarId": "..."}
 
 -- 'pending' = created, never authorized; 'reauth_required' = provider rejected our refresh token.
+-- 'gone' = a feed source that keeps answering 404/410 or isn't a feed (015). Migrations re-run on every boot,
+-- so this list must stay the superset of every status any later migration allows.
 alter table ops.connections drop constraint if exists connections_status_check;
 alter table ops.connections add constraint connections_status_check
-  check (status in ('pending', 'active', 'reauth_required', 'expired', 'revoked', 'error'));
+  check (status in ('pending', 'active', 'reauth_required', 'expired', 'revoked', 'error', 'gone'));
 
 -- Refresh tokens encrypted with AES-256-GCM under CONNECTION_KEY (env), never stored in plaintext.
 create table if not exists ops.connection_secrets (

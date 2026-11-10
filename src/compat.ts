@@ -41,6 +41,7 @@ export function assertServedClientCompatible(appHtml: string): number {
 const ItemAction = z.object({
   id: z.string(), label: z.string(), style: z.enum(['primary', 'danger']).optional(),
   choices: z.array(z.object({ id: z.string(), label: z.string(), input: z.enum(['date']).optional() })).optional(), // additive
+  url: z.string().optional(), // additive: an external link the app opens (and still POSTs the action, to record it)
 });
 
 export const AttentionItemSchema = z.object({

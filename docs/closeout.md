@@ -45,6 +45,60 @@ Chosen to stress what the first two didn't: per-item timers that outlive a run, 
 - **Named dates:** a date anchors the timer only when the message asks them to reply/deliver by it; a meeting date, the owner's own deadline or "I'm out until Friday" never does (critical in the eval).
 - **Tests:** `test-follow-up` (20 checks, in CI); `follow-up` eval suite (detection + nudge; critical: the owner's promise is never tracked as waiting on them, no false date anchor, nudges are sender-facing, add no facts, ≤1 placeholder).
 
+### Producer #4: Research Watch, the second connection type (V1: RSS/Atom)
+
+The question: is the base provider-agnostic, or "a really good Google machine"? A second source lifecycle with different connection semantics (no OAuth, no secret, health = "the last fetch worked") reuses the same producer, run, claims and Needs You machinery. **The source adapter is dumb; the producer owns judgment** (the same rule that kept Gmail push clean).
+
+- **The adapter** (`src/connections/feed.ts`) does four things: fetch, parse (RSS 2.0, RSS 1.0, Atom), normalize, hash. It keeps no state and makes no model calls. Fetch rules:
+  - conditional GET (ETag / Last-Modified, so a 304 means zero work);
+  - https only;
+  - every hop's resolved address must be public, checked inside the socket's own DNS lookup, so there's no rebinding gap;
+  - at most 3 redirects, each re-checked;
+  - 10 s timeout;
+  - a **2 MB cap on the decompressed body** (a 3 MB body gzipped to 3 KB is refused).
+  The parser refuses any DOCTYPE/ENTITY declaration (no external entities, no billion laughs) and anything that isn't well-formed XML.
+- **contentHash is pinned (v1):** sha256 over the normalized title and body text only. Item order, whitespace, markup, link tracking params, dates and entity spelling are excluded, so feed churn never reads as an "Updated".
+- **A source is a connection** (`provider 'feed'`, one row per feed). It is linked as **not required**, so one bad source never blocks the agent. Each source can be paused on its own, and removal is soft. Status:
+  - active;
+  - error after 3 failed fetches in a row;
+  - gone after 3 permanent failures (404/410, not a feed, refused).
+  Failed fetches never touch items. In Needs You a failing source shows as **Source unavailable** with Retry now / Remove source (a feed has no credential to re-consent).
+- **Checkpoint** (`ops.feed_items`). One row per (source, item), with two independent axes:
+  - `change_kind`: baseline | new | changed;
+  - `processing_state`: pending | claimed | judged | skipped.
+  `revision` increments when contentHash changes. **A claim is for (item, revision).** A judgment commits only if that revision is still current, so a run judging revision 1 can never mark revision 2 judged; the stale judgment is discarded and revision 2 gets its own. The previous title and text are kept so a card can say what changed. Claims are released when the owning run is dead for good, as in Inbox Triage.
+- **Adding a source baselines what's there**, so you don't get its history. Re-adding a removed source keeps its checkpoint and baselines anything new to us; nothing is replayed. **Backfill N** sends the newest N items through the *same* judgment pipeline; there is no second, historical path.
+- **Judgment:**
+  - One batched call per run, at most 10 items per source.
+  - It's judged against the owner's **explicit interest profile**: editable text, changed only by the owner.
+  - "Not relevant" is recorded as feedback and never changes the profile on its own.
+  - With no profile, nothing is judged (no paid call); items wait, checkpointed.
+- **Needs You:** "New from Alpha Blog: …" or "Updated from …: …", with:
+  - why it's relevant;
+  - for an update, the old title;
+  - Open (an external link: the app opens it and records the open), Not relevant, Got it;
+  - in the drill-in, full provenance (source, feed URL, item link, revision, item id, what changed, before/after).
+  **Ceiling:** at most 5 cards per source per run; the rest wait their turn without being judged again (a feed that suddenly publishes 200 "new" GUIDs can't flood Needs You).
+- **Google assumptions it exposed (and what changed):**
+  - The connection-problem card only offered Reconnect for google:*; it now offers feed-specific actions.
+  - The boot-time status constraint in 003 had to become the superset (a 'gone' row would otherwise have stopped the worker booting).
+  - Producers selecting `provider = 'google'` stay per-producer, which is fine.
+  No generic connections framework yet, on purpose: two providers now show what one would actually need.
+- **Tests:** `test-feed-watch`, 75 checks in CI, against fake feeds:
+  - formats;
+  - churn → same hash (6 kinds);
+  - DOCTYPE/billion-laughs/HTML/malformed refused;
+  - SSRF (private literals, redirects to metadata/private/loopback, a hostname resolving to loopback, a redirect loop), the decompressed cap and timeouts;
+  - add/baseline, no history flood, 304s with no re-judging;
+  - "Updated" with what changed;
+  - the revision race (rev 1's judgment discarded, rev 2 judged by its own run);
+  - the 5-card ceiling;
+  - per-source failure isolation, error/gone and Retry/Remove from Needs You;
+  - per-source pause/resume, remove/re-add with no replay, backfill through the same pipeline;
+  - a crash after claim, resumed by DBOS and dead for good;
+  - no profile → no judgment.
+  Eval: `feed-watch` suite (24 scenarios).
+
 ### External event ingress: Gmail push (V1)
 
 The base's first event from outside: a real provider pushes, we turn it into durable work. **A push is a wake-up signal, not a processing path.** The webhook never reads or interprets mail. It records the event and starts the existing Inbox Triage run, which reads from its own history cursor. The 20-minute schedule stays as the recovery path: Google may delay or drop a notification.

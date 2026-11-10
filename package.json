@@ -23,6 +23,7 @@
     "@dbos-inc/vercel-ai": "0.5.4",
     "@modelcontextprotocol/sdk": "1.32.2",
     "ai": "7.0.153",
+    "fast-xml-parser": "5.11.2",
     "pg": "8.23.1",
     "tsx": "4.23.15",
     "web-push": "^3.6.7",

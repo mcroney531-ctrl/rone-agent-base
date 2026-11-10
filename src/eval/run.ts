@@ -7,11 +7,13 @@ import { previewAgents, runSuite, setAgentPreview, type Split, type Suite } from
 import { inboxTriageSuite } from './inboxTriage.js';
 import { calendarPrepSuite } from './calendarPrep.js';
 import { followUpSuite } from './followUp.js';
+import { feedWatchSuite } from './feedWatch.js';
 
 const SUITES: Record<string, (db: typeof pool) => Suite> = {
   'inbox-triage': (db) => inboxTriageSuite(db),
   'calendar-prep': (db) => calendarPrepSuite(db),
   'follow-up': (db) => followUpSuite(db),
+  'feed-watch': (db) => feedWatchSuite(db),
 };
 
 const [name = 'all', ...rest] = process.argv.slice(2);
