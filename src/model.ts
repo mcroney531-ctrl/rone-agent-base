@@ -61,6 +61,19 @@ function scriptedMock() {
         if (process.env.MOCK_TRIAGE_LOG) fs.appendFileSync(process.env.MOCK_TRIAGE_LOG, `${DBOS.workflowID}\t${out.items.map((i) => i.ref).join(',')}\n`);
         return stop(JSON.stringify(out));
       }
+      if (options.responseFormat?.type === 'json' && promptText.includes('<feed_items>')) {
+        // Relevant iff the item mentions a profile keyword; the log lets tests prove no (item, revision) is judged twice.
+        const m = /<feed_items>([\s\S]*)<\/feed_items>/.exec(promptText);
+        const items = (m ? JSON.parse(m[1]) : []) as { ref: string; title: string; text: string }[];
+        const out = { items: items.map((i) => {
+          // Like the real model is told to: text that tries to steer the judgment is ignored, not obeyed.
+          const text = i.text.replace(/(system note|note to ai|ignore previous instructions)[\s\S]*/i, '');
+          const hit = /\b(agents?|postgres|durable)\b/i.exec(`${i.title} ${text}`)?.[1];
+          return { ref: i.ref, relevant: Boolean(hit), why: hit ? `Covers ${hit.toLowerCase()}, which is on your list.` : null };
+        }) };
+        if (process.env.MOCK_FEED_LOG) fs.appendFileSync(process.env.MOCK_FEED_LOG, `${DBOS.workflowID}\t${items.map((i) => i.ref).join(',')}\n`);
+        return stop(JSON.stringify(out));
+      }
       if (options.responseFormat?.type === 'json' && promptText.includes('<sent>')) return stop(JSON.stringify(mockDetect(promptText)));
       if (options.responseFormat?.type === 'json' && promptText.includes('<nudge>')) return stop(JSON.stringify({ draft: 'Just checking in on this when you have a moment.', ownerNote: null }));
       if (options.responseFormat?.type === 'json' && promptText.includes('<deeper>')) return stop(JSON.stringify(mockDeeper(promptText)));

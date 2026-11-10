@@ -119,6 +119,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-gmail-push.ts
 
+      - name: Research Watch (fake feeds) - second connection type, revisioned checkpoint, fetch/XML hardening
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-feed-watch.ts
+
       - name: Follow-up Tracker (fake Gmail) - durable items, reply-closes, snooze/not needed/nudge
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs

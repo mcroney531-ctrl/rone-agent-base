@@ -6,6 +6,7 @@
 //   /google/*      fake Google OAuth + Calendar (consent, token, userinfo, calendars, events, revoke)
 //   /google/gmail/* fake Gmail (profile, messages, history, labels, drafts, watch); every send/delete/trash attempt
 //                   is refused AND recorded, so tests can assert the system never tried
+//   /feeds/*       fake RSS/Atom sources: scripted body, status, delay, gzip, redirect; ETag + 304 like a real server
 //   /pubsub/*      fake Pub/Sub push: signs a Google-style OIDC token (RS256, keys at /pubsub/certs) and POSTs a
 //                   Gmail notification to an endpoint, like a push subscription does
 // Storage: Postgres (fake_provider schema) when FAKE_PROVIDER_DATABASE_URL is set, otherwise in memory —
@@ -399,6 +400,34 @@ async function fakeGmail(req: http.IncomingMessage, res: http.ServerResponse, u:
   return refuse(); // send, drafts/send, delete, trash, batchModify, settings … none of it is ours to do
 }
 
+// ---------- fake feeds ----------
+type FakeFeed = { body: string; status: number; delayMs: number; gzip: boolean; redirectTo: string | null; hits: number; notModified: number };
+const FEEDS = new Map<string, FakeFeed>();
+async function fakeFeeds(req: http.IncomingMessage, res: http.ServerResponse, path: string) {
+  // POST /feeds/admin/set/<name> {body?, status?, delayMs?, gzip?, redirectTo?}: unspecified fields keep their value
+  const set = /^\/feeds\/admin\/set\/([\w-]+)$/.exec(path)?.[1];
+  if (set && req.method === 'POST') {
+    const b = (await readBody(req)) as Partial<FakeFeed>;
+    const cur = FEEDS.get(set) ?? { body: '', status: 200, delayMs: 0, gzip: false, redirectTo: null, hits: 0, notModified: 0 };
+    FEEDS.set(set, { ...cur, ...b });
+    return send(res, 200, { ok: true });
+  }
+  if (path === '/feeds/admin/state') return send(res, 200, Object.fromEntries([...FEEDS].map(([k, v]) => [k, { hits: v.hits, notModified: v.notModified }])));
+  if (path === '/feeds/admin/reset' && req.method === 'POST') { FEEDS.clear(); return send(res, 200, { ok: true }); }
+  const name = /^\/feeds\/([\w-]+)$/.exec(path)?.[1];
+  const f = name ? FEEDS.get(name) : undefined;
+  if (!f) return send(res, 404, { error: 'no such feed' });
+  f.hits++;
+  if (f.delayMs) await new Promise((r) => setTimeout(r, f.delayMs));
+  if (f.redirectTo) return res.writeHead(302, { location: f.redirectTo }).end();
+  if (f.status !== 200) return res.writeHead(f.status, { 'content-type': 'text/plain' }).end('error');
+  const etag = `"${crypto.createHash('sha1').update(f.body).digest('hex').slice(0, 16)}"`;
+  if (req.headers['if-none-match'] === etag) { f.notModified++; return res.writeHead(304, { etag }).end(); }
+  const raw = Buffer.from(f.body);
+  const out = f.gzip ? (await import('node:zlib')).gzipSync(raw) : raw;
+  res.writeHead(200, { 'content-type': 'application/rss+xml', etag, ...(f.gzip ? { 'content-encoding': 'gzip' } : {}) }).end(out);
+}
+
 // ---------- fake Pub/Sub push ----------
 // One RSA key per process, published as a JWKS. Tokens carry the claims a real push subscription's OIDC
 // token does (iss accounts.google.com, aud, email, email_verified); tests can also forge bad ones.
@@ -451,6 +480,7 @@ http
       const path = reqUrl.pathname;
       if (path.startsWith('/google/') && (await fakeGoogle(req, res, reqUrl))) return;
       if (path.startsWith('/pubsub/')) return await fakePubSub(req, res, path);
+      if (path.startsWith('/feeds/')) return await fakeFeeds(req, res, path);
       // Fake push service: records encrypted Web Push deliveries; endpoint id 'gone' answers 410.
       if (path.startsWith('/push/')) {
         if (path === '/push/admin/received') return send(res, 200, PUSHES);

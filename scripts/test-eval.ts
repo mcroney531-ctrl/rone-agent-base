@@ -69,7 +69,7 @@ check('scoring: critical failures are listed, quality is separate', m.critical.l
 
 // ---- a full recorded run (scripted model) ----
 for (const f of ['001_ops_schema.sql', '003_connections.sql', '004_calendar_prep.sql', '005_attention.sql', '006_prep_holds.sql', '007_brief_view.sql',
-  '008_push.sql', '009_push_deliveries.sql', '010_agent_pause.sql', '011_inbox_triage.sql', '012_evals.sql', '013_follow_up.sql']) {
+  '008_push.sql', '009_push_deliveries.sql', '010_agent_pause.sql', '011_inbox_triage.sql', '012_evals.sql', '013_follow_up.sql', '014_push_ingress.sql', '015_feed_watch.sql']) {
   await db.query(fs.readFileSync(path.resolve('sql', f), 'utf8'));
 }
 const { pool } = await import('../src/db.js');
@@ -122,6 +122,14 @@ try {
   check('follow-up: every scenario judged in one batch and recorded', fu.metrics.n === fuN && fu.metrics.byLabel.waiting_on_them.support > 0, fu.metrics);
   check('follow-up: the scripted model never tracks the owner\'s own promise (no critical failures)', fu.status === 'passed', fu.metrics.critical);
   console.log(`\n${fu.report}\n`);
+
+  // ---- Research Watch suite: relevance judgment, scripted model ----
+  const { feedWatchSuite, loadCorpus: loadFw } = await import('../src/eval/feedWatch.js');
+  const fwN = loadFw().corpus.scenarios.length;
+  const fw = await runSuite(pool, feedWatchSuite(pool), ['dev', 'holdout']);
+  check('feed-watch: every scenario judged in one batch and recorded', fw.metrics.n === fwN && fw.metrics.byLabel.relevant.support > 0, fw.metrics);
+  check('feed-watch: the scripted model leaks no injection payload and adds no facts (no critical failures)', fw.status === 'passed', fw.metrics.critical);
+  console.log(`\n${fw.report}\n`);
 } finally {
   await pool.end();
   await db.end();

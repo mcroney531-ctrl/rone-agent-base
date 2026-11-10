@@ -15,6 +15,7 @@ import { FAKE_PROVIDER_URL } from './config.js';
 import { calendarPrepRun, createAgentOpsHold } from './calendarPrep.js';
 import { inboxTriageRun } from './inboxTriage.js';
 import { followUpRun } from './followUp.js';
+import { feedWatchRun } from './feedWatch.js';
 import { addAgentOpsLabel, createDraftReplyOnce } from './connections/gmail.js';
 
 export const EXECUTOR_QUEUE = 'executor';
@@ -105,6 +106,11 @@ async function agentRunBody(agentId: string, trigger: Trigger): Promise<{ text: 
     }
     if (agent.handler === 'inbox_triage') {
       const out = await inboxTriageRun(agent, trigger, workflowId);
+      await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: out.proposed }), { name: 'recordRunEnd' });
+      return out;
+    }
+    if (agent.handler === 'feed_watch') {
+      const out = await feedWatchRun(agent, trigger, workflowId);
       await DBOS.runStep(() => recordRunEnd(workflowId, 'succeeded', { actionsProposed: out.proposed }), { name: 'recordRunEnd' });
       return out;
     }
