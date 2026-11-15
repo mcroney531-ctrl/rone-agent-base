@@ -50,7 +50,7 @@
     "title": "Kill mid-agent-loop, NEW container (different executor ID) takes over",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "recoverMsFromKill": 8550,
+      "recoverMsFromKill": 9492,
       "reaped": {
         "reaped_by": "t1b-b",
         "reaped_count": 1
@@ -150,35 +150,34 @@
         "t3-old"
       ],
       "pendingOnOldAtKill": [
-        "sched-agent-spike-agent-2026-10-30T12:46:52.000Z",
+        "sched-agent-spike-agent-2026-11-15T16:57:42.000Z",
         "manual-spike-agent-deploy-inflight",
-        "sched-agent-spike-agent-2026-10-30T12:46:54.000Z",
-        "sched-agent-spike-agent-2026-10-30T12:46:56.000Z"
+        "sched-agent-spike-agent-2026-11-15T16:57:44.000Z"
       ],
-      "takeoverMs": 9942,
+      "takeoverMs": 11301,
       "inflightRun": {
         "run_state": "succeeded",
         "executor_id": "t3-new",
         "recovery_attempts": "1"
       },
       "inflightLedgerRows": 1,
-      "scheduledOccurrences": 9,
-      "distinctOccurrences": 9,
+      "scheduledOccurrences": 10,
+      "distinctOccurrences": 10,
       "byExecutor": {
         "t3-old": 1,
-        "t3-new": 8
+        "t3-new": 9
       },
       "nonTerminalAtEnd": [],
       "duplicateActionGroups": 0,
       "modelTurnsRunMoreThanOnce": {
-        "sched-agent-spike-agent-2026-10-30T12:46:52.000Z": [
+        "sched-agent-spike-agent-2026-11-15T16:57:42.000Z": [
           4
         ],
-        "sched-agent-spike-agent-2026-10-30T12:46:54.000Z": [
-          2
+        "manual-spike-agent-deploy-inflight": [
+          3
         ],
-        "sched-agent-spike-agent-2026-10-30T12:46:56.000Z": [
-          0
+        "sched-agent-spike-agent-2026-11-15T16:57:44.000Z": [
+          2
         ]
       }
     },
@@ -194,7 +193,7 @@
     "classification": "PASS",
     "metrics": {
       "exitCode": 0,
-      "drainMs": 3841,
+      "drainMs": 4037,
       "finalState": {
         "run_state": "succeeded",
         "executor_id": "t3b-old",
@@ -221,7 +220,7 @@
     "title": "Deploy a step-inserting code change while work is mid-flight (patching mode + DBOS.patch)",
     "classification": "PASS",
     "metrics": {
-      "settleMs": 5037,
+      "settleMs": 6045,
       "final": [
         {
           "logical_action": "calendar.hold",
@@ -330,7 +329,7 @@
         },
         {
           "kind": "action_stuck",
-          "ref": "cdf47e43-6575-4f22-a3fc-482c1700902e",
+          "ref": "d7c2ae8e-f4ef-4671-ac32-68335d8d5307",
           "detail": "approved but executor failed"
         }
       ],
@@ -377,7 +376,7 @@
         "status": "executed",
         "error": null
       },
-      "drainedByOldBuildMs": 1009
+      "drainedByOldBuildMs": 1007
     },
     "notes": [
       "Hard rule 4 as written (version = build) strands an old build's in-flight work once the old container is gone: v2 executors will not dequeue v1 rows, even after resume.",
@@ -391,12 +390,12 @@
     "classification": "PASS WITH ADAPTER",
     "metrics": {
       "oldExitCode": 0,
-      "drainMs": 2026,
+      "drainMs": 2018,
       "workflowAtOldExit": {
         "status": "PENDING",
         "executor_id": "t4d-old"
       },
-      "takeoverMs": 11099,
+      "takeoverMs": 10870,
       "oldExecutor": {
         "drained_flag": true,
         "reaped_by": "t4d-new"
@@ -486,7 +485,7 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "45beb4b2-67bc-4601-b68f-bb4ada824643",
+          "ref": "e7cf1387-6573-4aaf-8471-12a05675b8f7",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {
@@ -528,15 +527,19 @@
       "pgDependOpsOnDbos": [],
       "viewsMentioningDbos": [
         {
+          "viewname": "v_runs",
+          "mentions_dbos": false
+        },
+        {
           "viewname": "agent_health",
           "mentions_dbos": false
         },
         {
-          "viewname": "attention_queue",
+          "viewname": "mail_push_health",
           "mentions_dbos": false
         },
         {
-          "viewname": "v_runs",
+          "viewname": "attention_queue",
           "mentions_dbos": false
         }
       ],
@@ -554,7 +557,7 @@
           "health_state": "blocked",
           "last_outcome": "failed",
           "last_error_class": "connection_unavailable",
-          "last_finished_at": "2026-10-30T12:49:25.911Z",
+          "last_finished_at": "2026-11-15T17:00:14.604Z",
           "runs_24h": "4",
           "failures_24h": "3",
           "running_now": "0",
@@ -590,6 +593,32 @@
           "blocked_connections": [
             "google:primary"
           ]
+        },
+        {
+          "agent_id": "follow-up-tracker",
+          "health_state": "blocked",
+          "last_outcome": null,
+          "last_error_class": null,
+          "last_finished_at": null,
+          "runs_24h": "0",
+          "failures_24h": "0",
+          "running_now": "0",
+          "pending_approvals": "0",
+          "blocked_connections": [
+            "google:primary"
+          ]
+        },
+        {
+          "agent_id": "research-watch",
+          "health_state": "idle",
+          "last_outcome": null,
+          "last_error_class": null,
+          "last_finished_at": null,
+          "runs_24h": "0",
+          "failures_24h": "0",
+          "running_now": "0",
+          "pending_approvals": "0",
+          "blocked_connections": null
         }
       ]
     },
@@ -601,39 +630,21 @@
   },
   "t7": {
     "id": "t7",
-    "title": "Supabase-style connection modes: direct / session pooler / transaction pooler (pgbouncer stand-in)",
-    "classification": "PASS WITH ADAPTER",
+    "title": "t7",
+    "classification": "FAIL",
     "metrics": {
-      "guardOn6543": "refused: Refusing to start: aws-0-us-east-1.pooler.supabase.com:6543 looks like a transac",
-      "guardOnSession5432": "allowed",
-      "listenProbeDirect": "ok",
-      "listenProbeSessionPooler": "ok",
-      "listenProbeTxPooler": "fail: LISTEN/NOTIFY probe timed out after 3000ms — not a session-capable connection",
-      "workerOnTxPoolerWithGuard": {
-        "exitCode": 1
-      },
-      "sessionPooler": {
-        "crashRecovery": "succeeded",
-        "approvalToExecutedMs": 1026,
-        "dbosSelfTestWarning": false
-      },
-      "transactionPoolerWithGuardBypassed": {
-        "booted": true,
-        "dbosSelfTestWarning": true,
-        "runCompletedMs": 2235
-      }
+      "error": "aborted while waiting for t7-sess boot"
     },
     "notes": [
-      "Stand-in: local pgbouncer in session and transaction pool modes. Supabase's pooler is Supavisor; re-run t7 against the real project before locking.",
-      "DBOS 5.3 itself only WARNS behind a transaction pooler and falls back to polling; our startup guard turns that silent degradation into a refusal."
+      "harness error"
     ]
   },
   "t8": {
     "id": "t8",
     "title": "Upgrade DBOS under live data (5.1.10 → 5.2.11 → 5.3.0)",
-    "classification": "PASS",
+    "classification": "FAIL",
     "metrics": {
-      "exitCode": 0,
+      "exitCode": 1,
       "transcript": [
         "== seed with DBOS 5.1.10",
         "Running DBOS system database migrations...",
@@ -641,11 +652,11 @@
         "== upgrade -> DBOS 5.2.11 (probe-pending-5.1.10 before: PENDING)",
         "Running DBOS system database migrations...",
         "[probe] recovered result: done-pending",
-        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=3 attention rows=0 | ops->dbos deps=0",
+        "   migrations 122 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded | agent_health rows=5 attention rows=ERROR:  relation \"ops.attention_queue\" does not exist",
         "== upgrade -> DBOS 5.3.0 (probe-pending-5.2.11 before: PENDING)",
         "[probe] recovered result: done-pending",
-        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=3 attention rows=0 | ops->dbos deps=0",
-        "UPGRADE TEST: PASS"
+        "   migrations 123 -> 123 | recovery ok | v_runs: probe-pending-5.1.10=succeeded, probe-pending-5.2.11=succeeded | agent_health rows=5 attention rows=ERROR:  relation \"ops.attention_queue\" does not exist",
+        "UPGRADE TEST: FAIL"
       ]
     },
     "notes": [
@@ -659,11 +670,11 @@
     "title": "H1: zombie executor, heartbeat partitioned while the process keeps running",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 6053,
-      "zombieExitMsAfterSilence": 2348,
+      "reapMsAfterSilence": 5837,
+      "zombieExitMsAfterSilence": 2245,
       "fencedBeforeReap": true,
       "zombieExit": 70,
-      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3001ms (lease 3000ms); exiting before a peer takes over our work",
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 3003ms (lease 3000ms); exiting before a peer takes over our work",
       "conflictLines": 0,
       "finalState": {
         "run_state": "succeeded",
@@ -689,14 +700,14 @@
           4
         ]
       },
-      "healthSamples": 47,
+      "healthSamples": 45,
       "healthTimeline": [
         "idle",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 19738,
+        "t": 18640,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
@@ -712,11 +723,11 @@
     "title": "H1: zombie executor, process frozen past the reap, then wakes mid-way through the peer's run",
     "classification": "PASS WITH ADAPTER",
     "metrics": {
-      "reapMsAfterSilence": 6063,
-      "zombieExitMsAfterSilence": 6097,
+      "reapMsAfterSilence": 5835,
+      "zombieExitMsAfterSilence": 5850,
       "fencedBeforeReap": true,
       "zombieExit": 70,
-      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 6710ms (lease 3000ms); exiting before a peer takes over our work",
+      "fenceLine": "[recovery] FENCED: heartbeat not renewed for 6618ms (lease 3000ms); exiting before a peer takes over our work",
       "conflictLines": 0,
       "finalState": {
         "run_state": "succeeded",
@@ -745,12 +756,11 @@
       "healthSamples": 45,
       "healthTimeline": [
         "idle",
-        "degraded",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 18927,
+        "t": 18650,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
@@ -766,7 +776,7 @@
     "classification": "PASS WITH ADAPTER",
     "metrics": {
       "reapMsAfterSilence": 813,
-      "zombieExitMsAfterSilence": 10254,
+      "zombieExitMsAfterSilence": 10432,
       "fencedBeforeReap": true,
       "zombieExit": 70,
       "fenceLine": "[recovery] FENCED: this executor was reaped by t9c-b; exiting so work is not run twice",
@@ -795,14 +805,14 @@
           4
         ]
       },
-      "healthSamples": 36,
+      "healthSamples": 35,
       "healthTimeline": [
         "idle",
         "healthy"
       ],
       "misleadingSamples": [],
       "final": {
-        "t": 15053,
+        "t": 14607,
         "health": "healthy",
         "lastOutcome": "succeeded",
         "items": []
