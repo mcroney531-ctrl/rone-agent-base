@@ -9,8 +9,9 @@ import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE } from './workflows.js
 import { startGoogleAuth } from './connections/google.js';
 import { closeNotNeeded, followUpNudge, snoozeItem } from './followUp.js';
 import { recordFeedback, removeSource } from './feedWatch.js';
+import { DATE_KIND_LABEL, KNOWN_ONLY, getCredential, knownImpact, renewCredential, retireCredential, type DateKind } from './credentials.js';
 
-export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed' | 'not_relevant' | 'remove_source';
+export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed' | 'not_relevant' | 'remove_source' | 'renewed';
 // choices: the action needs one more input (e.g. Snooze: how long). The app shows them and POSTs { choice }.
 export type ActionChoice = { id: string; label: string; input?: 'date' };
 // url: an external link the app opens in a new tab; it still POSTs the action so the open is recorded.
@@ -44,6 +45,8 @@ const A = {
   notNeeded: { id: 'not_needed', label: 'Not needed' },
   notRelevant: { id: 'not_relevant', label: 'Not relevant' },
   removeSource: { id: 'remove_source', label: 'Remove source', style: 'danger' },
+  renewed: { id: 'renewed', label: 'Renewed', style: 'primary', choices: [{ id: 'date', label: 'New date', input: 'date' }, { id: 'none', label: "Doesn't expire" }] },
+  retire: { id: 'not_needed', label: 'Not needed / retired' },
 } satisfies Record<string, ItemAction>;
 
 const humanize = (id: string) => id.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_:.]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
@@ -55,7 +58,7 @@ const ACTION_NAMES: Record<string, string> = {
 const HIDDEN_FIELDS = new Set(['start', 'end', 'connectionId', 'briefDate', 'messageId', 'threadId', 'inReplyTo', 'references', 'fromName']);
 
 // One entry per attention kind. `title`/`summary` get the row; actions are what the owner can do from the phone.
-const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; summary?: (r: Row) => string; actions: (r: Row) => ItemAction[] }> = {
+const KINDS: Record<string, { severity: Severity | ((r: Row) => Severity); title: (r: Row) => string; summary?: (r: Row) => string; actions: (r: Row) => ItemAction[] }> = {
   approval_needed: {
     severity: 'decision',
     title: (r) => `${ACTION_NAMES[r.extra?.logical_action] ?? r.extra?.logical_action ?? 'Action'} — approve?`,
@@ -111,6 +114,24 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
   queued_too_long: { severity: 'problem', title: () => 'Run waiting too long', actions: () => [A.dismiss] },
   no_executor_for_version: { severity: 'problem', title: () => 'No worker for this version', actions: () => [A.dismiss] },
   executor_unreaped: { severity: 'problem', title: () => 'Worker stopped responding', actions: () => [A.dismiss] },
+  // Credential Watch (src/credentials.ts): one item per credential; its stage moves 14d → 7d → passed. A passed
+  // date is a decision (renew, or retire if not needed), never a dismissal; it never changes connection status.
+  credential_expiry: {
+    severity: (r) => (credStage(r) >= 4 ? 'decision' : 'problem'),
+    title: (r) => credTitle(r),
+    summary: (r) => {
+      const x = r.extra ?? {};
+      return [x.date_kind === 'provider_target' && credStage(r) >= 4 ? 'The provider target has passed. Nothing has been shown to stop working; this is a reminder, not a status.' : null,
+        x.secret_ref ? `Stored at (known): ${x.secret_ref}` : null].filter(Boolean).join('\n');
+    },
+    actions: (r) => {
+      const stage = credStage(r);
+      const open = r.extra?.renew_url ? [{ ...A.open, id: 'open' as const, label: 'Open renewal page', style: undefined, url: String(r.extra.renew_url) }] : [];
+      const managed = r.extra?.managed_by === 'manual';
+      const ack = stage >= 4 ? [] : [{ ...A.dismiss, label: stage === 2 ? 'Got it until 7 days' : 'Got it until the date' }];
+      return [...(managed ? [A.renewed] : []), ...open, ...ack, ...(managed ? [A.retire] : [])];
+    },
+  },
   // Gmail push (src/ingress.ts). Triage keeps running every 20 minutes either way; these say it's slower.
   // Run now renews the watch (manual runs do); a later failure or new misses bring the item back.
   mail_push_off: {
@@ -124,6 +145,20 @@ const KINDS: Record<string, { severity: Severity; title: (r: Row) => string; sum
     actions: () => [A.dismiss],
   },
 };
+const credStage = (r: Row) => Number(r.extra?.stage ?? 0);
+function credTitle(r: Row): string {
+  const x = r.extra ?? {};
+  const name = x.display_name ?? r.ref;
+  const days = Number(x.days_left);
+  if (credStage(r) >= 4) {
+    return x.date_kind === 'provider_target' ? `${name}: provider deprecation target passed (still working until shown otherwise)`
+      : x.date_kind === 'review_by' ? `${name}: review overdue` : `${name}: expired`;
+  }
+  const when = days <= 0 ? 'today' : days === 1 ? 'in 1 day' : `in ${days} days`;
+  return x.date_kind === 'provider_target' ? `${name}: provider deprecation target ${when}`
+    : x.date_kind === 'review_by' ? `${name}: review due ${when}` : `${name}: expires ${when}`;
+}
+
 const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due']); // only resolving them clears them
 const FALLBACK = { severity: 'problem' as Severity, title: (r: Row) => humanize(r.kind), actions: () => [A.dismiss] };
 
@@ -142,11 +177,12 @@ function fmtRange(start: string, end?: string): string {
 
 function toItem(r: Row): AttentionItem {
   const k = KINDS[r.kind] ?? FALLBACK;
-  const source = r.kind === 'connection_problem' ? humanize(r.ref.split(':')[0]) : r.agent_id ? humanize(r.agent_id) : 'System';
+  const source = r.kind === 'connection_problem' ? humanize(r.ref.split(':')[0]) : r.kind === 'credential_expiry' ? 'Credential Watch'
+    : r.agent_id ? humanize(r.agent_id) : 'System';
   return {
     id: `${r.kind}:${r.ref}`, type: r.kind, ref: r.ref, agent: r.agent_id, source,
     title: k.title(r), summary: (k as typeof KINDS[string]).summary?.(r) ?? r.detail ?? '',
-    severity: k.severity, createdAt: (r.since ?? new Date()).toISOString(), actions: k.actions(r),
+    severity: typeof k.severity === 'function' ? k.severity(r) : k.severity, createdAt: (r.since ?? new Date()).toISOString(), actions: k.actions(r),
   };
 }
 
@@ -168,7 +204,13 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
                          'why', i.why, 'change_kind', i.change_kind, 'prev_title', i.prev_title, 'prev_text', i.prev_text, 'text', left(i.text, 600),
                          'published_at', i.published_at, 'revision', i.revision, 'first_seen_at', i.first_seen_at, 'last_changed_at', i.last_changed_at,
                          'content_hash', i.content_hash, 'prev_hash', i.prev_hash, 'item_key', i.item_key)
-                   from ops.feed_items i join ops.connections c on c.id = i.connection_id where i.id::text = q.ref) end as extra
+                   from ops.feed_items i join ops.connections c on c.id = i.connection_id where i.id::text = q.ref)
+              when q.kind = 'credential_expiry' then
+                (select jsonb_build_object('display_name', c.display_name, 'date_kind', c.date_kind, 'expires_at', c.expires_at,
+                         'stage', ops.credential_stage(c.expires_at, now()), 'managed_by', c.managed_by, 'renew_url', c.renew_url,
+                         'secret_ref', c.secret_ref,
+                         'days_left', floor(extract(epoch from c.expires_at - now()) / 86400)::int)
+                   from ops.connections c where c.id = q.ref) end as extra
        from ops.attention_queue q
        left join ops.attention_acks k on k.kind = q.kind and k.ref = q.ref
       where (k.acked_at is null or q.since > k.acked_at)
@@ -231,6 +273,21 @@ export async function attentionDetail(kind: string, ref: string) {
         for (const [k2, v] of Object.entries(p)) if (!HIDDEN_FIELDS.has(k2)) add(humanize(k2), v);
       }
       add('Error', a.error); add('Proposed by run', a.source_workflow_id);
+    }
+  } else if (kind === 'credential_expiry') {
+    const c = await getCredential(ref);
+    if (c) {
+      add('Credential', c.display_name ?? c.id); add('Provider', c.provider); add('Kind', humanize(c.kind));
+      add(DATE_KIND_LABEL[c.date_kind as DateKind] ?? 'Date', c.expires_at ? fmtDay(new Date(c.expires_at).toISOString()) : null);
+      add('Where it is stored (known)', c.secret_ref);
+      add('Renewal notes', c.notes);
+      const cons = c.consumers as { consumer: string; confidence: string; evidence: string }[];
+      add('Known consumers — confirmed', cons.filter((x) => x.confidence === 'confirmed').map((x) => `${x.consumer} (${x.evidence})`));
+      add('Known consumers — candidate (unverified)', cons.filter((x) => x.confidence === 'candidate').map((x) => `${x.consumer} (${x.evidence})`));
+      add('Checks', (c.checks as { scope: string; result: string; checkedAt: string }[]).map((k) => `${k.scope}: ${k.result} (${fmtDay(new Date(k.checkedAt).toISOString())})`));
+      add('Known impact', knownImpact(cons, c.checks));
+      add('Coverage', KNOWN_ONLY);
+      add('Status', c.managed_by === 'manual' ? 'Not verified (tracked by date only)' : humanize(c.status));
     }
   } else if (kind === 'connection_problem') {
     const { rows: [c] } = await pool.query(`select provider, status, account_label, last_error, last_checked_at from ops.connections where id = $1`, [ref]);
@@ -304,7 +361,20 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
       const r = await snoozeItem(ref, choice, by);
       return { ok: r.ok, status: r.ok ? 200 : 400, message: r.message };
     }
+    case 'renewed': {
+      if (kind !== 'credential_expiry') return { ok: false, status: 400, message: 'Unknown action.' };
+      if (!choice) return { ok: false, status: 400, message: 'Choose the new date.' };
+      try {
+        const r = await renewCredential(ref, choice);
+        return { ok: r.ok, status: r.ok ? 200 : 400, message: r.message };
+      } catch (e) {
+        return { ok: false, status: 400, message: (e as Error).message };
+      }
+    }
     case 'not_needed':
+      if (kind === 'credential_expiry') {
+        return (await retireCredential(ref)) ? { ok: true, status: 200, message: 'Retired. No more warnings for it.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
+      }
       return (await closeNotNeeded(ref)) ? { ok: true, status: 200, message: 'Closed. No follow-up needed.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
     case 'nudge': {
       const workflowId = `nudge-${ref}-${requestId || randomUUID()}`;

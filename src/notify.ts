@@ -14,7 +14,7 @@ import { inQuietHours } from './quietHours.js';
 export const PUSH_KINDS = new Set([
   'approval_needed', 'brief_ready', 'deeper_ready', 'connection_problem',
   'run_failed', 'run_stuck', 'queued_too_long', 'no_executor_for_version', 'executor_unreaped',
-  'action_failed', 'action_stuck',
+  'action_failed', 'action_stuck', 'credential_expiry',
 ]);
 
 // ---------- VAPID keys: generated once, private half sealed in the database ----------
@@ -144,6 +144,9 @@ export function messageFor(item: AttentionItem, open: AttentionItem[]): PushMess
     case 'connection_problem': return { ...base, body: `${item.source} connection needs attention` };
     case 'run_failed': return { ...base, body: `${item.source}: a run failed` };
     case 'action_failed': return { ...base, body: `${item.source}: an action could not be completed` };
+    // Never the credential's name on the lock screen. Built at send time from the live item, so it states
+    // the current stage, not the stage that was current when the delivery was planned.
+    case 'credential_expiry': return { ...base, body: item.severity === 'decision' ? 'A tracked credential date has passed' : 'A tracked credential date is coming up' };
     default: return { ...base, body: `${item.source} needs attention` };
   }
 }

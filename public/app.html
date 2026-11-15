@@ -452,6 +452,7 @@ async function agents() {
           toast(r.body.message ?? r.body.error ?? 'Done'); route();
         }) }, a.paused_at ? 'Resume' : 'Pause')) : null)),
     await sourcesCard(),
+    await credentialsCard(),
     await notificationsCard(),
     h('p', { class: 'muted', style: 'margin-top:24px' }, `Signed in as ${session?.user?.email ?? '?'} · `,
       h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await signOutHere(); route(); } }, 'Sign out')),
@@ -490,6 +491,93 @@ async function sourcesCard() {
       const r = await api('/sources', { method: 'POST', body: { url: urlIn.value.trim() } });
       if (r.status === 201) { toast(`Watching ${r.body.title}`); route(); } else toast(r.body.error ?? 'Could not add it');
     }) }, 'Add source')));
+}
+
+// ---------- Credential Watch: tracked credentials (dates, known consumers, checks) ----------
+// Never a secret value: "where it's stored" is a location by name, and the server refuses anything key-shaped.
+// Consumers are what is KNOWN (confirmed or candidate, each with evidence); the card never implies completeness.
+const DATE_KIND = { expires: 'Expires', provider_target: 'Provider target (not final)', review_by: 'Review by' };
+async function credentialsCard() {
+  const r = await api('/credentials');
+  const list = Array.isArray(r.body) ? r.body : [];
+  const act = (fn) => async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try { await fn(); } catch (err) { handleErr(err); }
+    btn.disabled = false;
+  };
+  const field = (ph, type = 'text') => h('input', { type, placeholder: ph, style: 'width:100%;font-size:16px;margin:4px 0' });
+  const pick = (opts) => h('select', { style: 'font-size:16px;margin:4px 0' }, ...opts.map(([v, l]) => h('option', { value: v }, l)));
+  const fail = (res) => { toast(res.body?.error ?? 'Could not save'); return res.status >= 300; };
+  const when = (c) => {
+    if (!c.expires_at) return 'No date tracked';
+    const d = new Date(c.expires_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const left = c.days_left < 0 ? `${-c.days_left} days ago` : c.days_left === 0 ? 'today' : `in ${c.days_left} days`;
+    return `${DATE_KIND[c.date_kind] ?? 'Date'}: ${d} (${left})`;
+  };
+  const stagePill = (c) => c.stage >= 4 ? h('span', { class: 'pill failing' }, 'passed')
+    : c.stage >= 2 ? h('span', { class: 'pill failing' }, 'soon') : c.stage === 1 ? h('span', { class: 'pill' }, 'within 30 days') : null;
+  const row = (c) => {
+    const manual = c.managed_by === 'manual';
+    const conf = c.consumers.filter((x) => x.confidence === 'confirmed').length;
+    const cand = c.consumers.length - conf;
+    const more = h('div', { hidden: true, style: 'margin-top:8px' });
+    const date = h('input', { type: 'date', style: 'font-size:16px' });
+    const consumer = field('Consumer, e.g. rone-agent-base → worker');
+    const confidence = pick([['candidate', 'Candidate (unverified)'], ['confirmed', 'Confirmed']]);
+    const evidence = field('Evidence: how you know');
+    const scope = field('What was checked, e.g. Railway variable names, 9 projects');
+    const result = field('Result');
+    more.append(
+      ...(c.consumers.length ? c.consumers.map((x) => h('div', { class: 'muted' }, `${x.confidence === 'confirmed' ? '✓' : '?'} ${x.consumer} — ${x.evidence}`)) : [h('div', { class: 'muted' }, 'No known consumers recorded.')]),
+      ...c.checks.map((k) => h('div', { class: 'muted' }, `Checked ${k.scope}: ${k.result}`)),
+      h('div', { class: 'muted', style: 'margin-top:6px' }, 'Known consumers only. This list has not been shown to be complete.'),
+      c.notes ? h('div', { class: 'summary', style: 'margin-top:6px' }, c.notes) : null,
+      manual ? h('div', {},
+        h('div', { class: 'label' }, 'Change date'), date,
+        h('div', { class: 'actions' },
+          h('button', { onclick: act(async () => { if (!date.value) return toast('Pick a date'); if (!fail(await api(`/credentials/${enc(c.id)}`, { method: 'PATCH', body: { date: date.value } }))) { toast('Saved'); route(); } }) }, 'Save date'),
+          h('button', { onclick: act(async () => { if (!fail(await api(`/credentials/${enc(c.id)}`, { method: 'PATCH', body: { date: null } }))) { toast('No date tracked'); route(); } }) }, "Doesn't expire"))) : null,
+      h('div', { class: 'label' }, 'Add a known consumer'), consumer, confidence, evidence,
+      h('div', { class: 'actions' }, h('button', { onclick: act(async () => {
+        const res = await api(`/credentials/${enc(c.id)}/consumers`, { method: 'POST', body: { consumer: consumer.value, confidence: confidence.value, evidence: evidence.value } });
+        if (!fail(res)) { toast('Added'); route(); }
+      }) }, 'Add consumer')),
+      h('div', { class: 'label' }, 'Record a check'), scope, result,
+      h('div', { class: 'actions' }, h('button', { onclick: act(async () => {
+        const res = await api(`/credentials/${enc(c.id)}/checks`, { method: 'POST', body: { scope: scope.value, result: result.value } });
+        if (!fail(res)) { toast('Recorded'); route(); }
+      }) }, 'Record check')),
+      manual ? h('div', { class: 'actions' }, h('button', { class: 'danger', onclick: act(async () => {
+        if (!confirm(`Retire "${c.display_name}"? Its warnings stop.`)) return;
+        if (!fail(await api(`/credentials/${enc(c.id)}`, { method: 'DELETE' }))) route();
+      }) }, 'Not needed / retire')) : h('div', { class: 'muted' }, 'Managed by its integration; tracked here read-only.'));
+    return h('div', { style: 'margin-top:12px' },
+      h('div', { class: 'row' }, h('span', {}, c.display_name ?? c.account_label ?? c.id), stagePill(c)),
+      h('div', { class: 'muted' }, `${c.provider} · ${c.kind.replace('_', ' ')}${manual ? ' · not verified' : ''}`),
+      h('div', { class: 'muted' }, when(c)),
+      c.secret_ref ? h('div', { class: 'muted', style: 'overflow-wrap:anywhere' }, `Stored at (known): ${c.secret_ref}`) : null,
+      h('div', { class: 'muted' }, `Known consumers: ${conf} confirmed, ${cand} candidate`),
+      h('div', { class: 'actions' }, h('button', { onclick: (e) => { more.hidden = !more.hidden; e.currentTarget.textContent = more.hidden ? 'Details' : 'Hide'; } }, 'Details')),
+      more);
+  };
+  const name = field('Name, e.g. Anthropic API key (worker)');
+  const provider = field('Provider, e.g. anthropic');
+  const kind = pick([['api_key', 'API key'], ['pat', 'Personal access token'], ['oauth', 'OAuth'], ['admin_key', 'Admin key'], ['secret', 'Secret'], ['other', 'Other']]);
+  const date = h('input', { type: 'date', style: 'font-size:16px' });
+  const dateKind = pick([['expires', 'Expires on'], ['provider_target', 'Provider deprecation target'], ['review_by', 'Review by']]);
+  const ref = field('Where it is stored, e.g. railway:worker/ANTHROPIC_API_KEY (never the value)');
+  const renew = field('Renewal page (https://…)', 'url');
+  const notes = h('textarea', { rows: 2, style: 'width:100%;font:inherit;font-size:16px', placeholder: 'Renewal notes, e.g. what else stops working with it' });
+  return h('div', { class: 'card' },
+    h('div', { class: 'title' }, 'Credentials'),
+    h('div', { class: 'muted' }, 'Dates only. Warnings at 14 days, 7 days and when the date passes. Nothing here checks that a key works.'),
+    ...list.map(row),
+    h('div', { class: 'label', style: 'margin-top:16px' }, 'Track a credential'), name, provider, kind, date, dateKind, ref, renew, notes,
+    h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: act(async () => {
+      const res = await api('/credentials', { method: 'POST', body: { name: name.value, provider: provider.value, kind: kind.value, date: date.value || null,
+        dateKind: dateKind.value, secretRef: ref.value, renewUrl: renew.value, notes: notes.value } });
+      if (!fail(res)) { toast('Tracking it'); route(); }
+    }) }, 'Track')));
 }
 
 // ---------- push notifications (one subscription per device) ----------

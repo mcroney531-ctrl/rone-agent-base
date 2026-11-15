@@ -236,6 +236,16 @@ select 'feed_item', i.id::text, 'research-watch', i.surfaced_at, i.title
  where i.relevant and i.processing_state = 'judged' and i.judged_revision = i.revision
    and i.surfaced_at is not null and i.seen_at is null and c.removed_at is null and c.paused_at is null
 union all
+-- Credential Watch (016): one item per tracked credential, from 14 days before its date. `since` is when the
+-- CURRENT stage's warning was raised (ops.credential_since), so each escalation re-raises the same item once.
+-- Only active, unpaused, unremoved rows: a connection that is already unhealthy shows as connection_problem.
+select 'credential_expiry', c.id, null, ops.credential_since(c.expires_at, c.alert_stage, c.alert_stage_since, now()),
+       coalesce(c.display_name, c.id)
+  from ops.connections c
+ where c.kind is not null and c.expires_at is not null and c.status = 'active'
+   and c.paused_at is null and c.removed_at is null
+   and ops.credential_stage(c.expires_at, now()) >= 2
+union all
 -- Gmail push: an objectively broken watch shows at once; inferred breakage (misses) only when repeated.
 select 'mail_push_off', h.agent_id, h.agent_id, coalesce(h.last_error_at, h.expiration),
        case h.push_state when 'failing' then 'Renewing the Gmail watch failed: ' || h.last_error
