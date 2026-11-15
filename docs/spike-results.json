@@ -9,7 +9,7 @@
         "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 7687,
+      "recoverMs": 7665,
       "finalState": {
         "run_state": "succeeded",
         "recovery_attempts": "1",

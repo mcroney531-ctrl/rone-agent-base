@@ -129,6 +129,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-follow-up.ts
 
+      - name: Credential Watch V1A (fake push) - stage transitions, edits, acks, retirement, stale retries, no secrets
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-credentials.ts
+
       - name: Eval harness (checks, corpus, recorded run on the scripted model)
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
