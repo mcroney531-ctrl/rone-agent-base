@@ -17,6 +17,11 @@ export const AGENT_ID = 'research-watch';
 export const PER_SOURCE_CLAIM = 10;   // items judged per source per run; the rest stay pending
 export const SURFACE_CAP = 5;         // relevant cards emitted per source per run; the rest wait their turn
 export const FAILURES_TO_ALERT = 3;   // consecutive failed fetches before the source shows in Needs You
+// A feed is a sliding window, not a publish history: many feeds rotate OLD posts back in. An item we've never
+// seen is "new" only if it was published around or after the day we started watching the source (minus this
+// grace); an older one is filed as baseline, exactly like the items present when the source was added.
+// Edits to old items still count (an edited old post can matter); only first sightings are affected.
+export const OLD_ITEM_GRACE_DAYS = 7;
 const PREV_TEXT_CHARS = 1000;
 
 // ---------- sources (configuration; called from the HTTP API, not from workflows) ----------
@@ -175,15 +180,21 @@ async function checkpoint(src: Source, feed: ParsedFeed, fetched: { etag: string
     const { rows } = await c.query(
       `select item_key, content_hash, title, text from ops.feed_items where connection_id = $1 and item_key = any($2::text[]) for update`, [src.id, keys]);
     const known = new Map(rows.map((r) => [r.item_key as string, r]));
+    // When we started watching this source: its first checkpoint (the baseline at add time).
+    const { rows: [w] } = await c.query(`select min(first_seen_at) as since from ops.feed_items where connection_id = $1`, [src.id]);
+    const oldBefore = w?.since ? new Date(w.since).getTime() - OLD_ITEM_GRACE_DAYS * 86_400_000 : null;
     let added = 0, changed = 0;
     for (const i of feed.items) {
       const k = known.get(i.key);
       if (!k) {
+        // First sighting of an item published well before we started watching: an old post rotating back into
+        // the feed's window, not news. Filed as baseline (never judged, never surfaced). No date → treated as new.
+        const old = oldBefore !== null && i.published !== null && Date.parse(i.published) < oldBefore;
         const r = await c.query(
           `insert into ops.feed_items (connection_id, item_key, link, title, published_at, text, content_hash, change_kind, processing_state)
-           values ($1, $2, $3, $4, $5, $6, $7, 'new', 'pending') on conflict (connection_id, item_key) do nothing`,
-          [src.id, i.key, i.link, i.title, i.published, i.text, i.contentHash]);
-        added += r.rowCount ?? 0;
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict (connection_id, item_key) do nothing`,
+          [src.id, i.key, i.link, i.title, i.published, i.text, i.contentHash, old ? 'baseline' : 'new', old ? 'skipped' : 'pending']);
+        if (!old) added += r.rowCount ?? 0;
       } else if (k.content_hash !== i.contentHash) {
         // A new revision. Any claim on the old revision is void: its judgment will be discarded at commit.
         await c.query(
