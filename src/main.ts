@@ -21,7 +21,7 @@ import { listConnections } from './connections/store.js';
 import { assertServedClientCompatible, CLIENT_COMPAT_HEADER, outdatedClient } from './compat.js';
 import { handleGmailPush, pushConfig, verifyPushToken } from './ingress.js';
 import { addSource, getInterests, listSources, removeSource, setInterests, setSourcePaused } from './feedWatch.js';
-import { CredentialError, addCheck, addConsumer, createCredential, getCredential, listCredentials, removeConsumer, retireCredential, updateCredential } from './credentials.js';
+import { CredentialError, addCheck, asObject, addConsumer, createCredential, getCredential, listCredentials, removeConsumer, retireCredential, updateCredential } from './credentials.js';
 import { FeedError } from './connections/feed.js';
 
 if (process.env.UNSAFE_SKIP_CONNECTION_GUARD === '1') {
@@ -266,26 +266,27 @@ const server = http.createServer(async (req, res) => {
       const id = decodeURIComponent(parts[1] ?? '');
       try {
         if (req.method === 'GET' && parts.length === 1) return send(res, 200, await listCredentials());
-        if (req.method === 'POST' && parts.length === 1) return send(res, 201, await createCredential(await readJson(req)));
+        if (req.method === 'POST' && parts.length === 1) return send(res, 201, await createCredential(asObject(await readJson(req))));
         if (req.method === 'GET' && parts.length === 2) {
           const c = await getCredential(id);
           return c ? send(res, 200, c) : send(res, 404, { error: 'no such credential' });
         }
         if (req.method === 'PATCH' && parts.length === 2) {
-          const r = await updateCredential(id, await readJson(req));
+          const r = await updateCredential(id, asObject(await readJson(req)));
           return r === 'ok' ? send(res, 200, await getCredential(id)) : send(res, r === 'missing' ? 404 : 409,
             { error: r === 'missing' ? 'no such credential' : 'managed by its integration; change it there' });
         }
         if (req.method === 'DELETE' && parts.length === 2) {
           return (await retireCredential(id)) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'no such credential (or not manually tracked)' });
         }
-        if (req.method === 'POST' && parts.length === 3 && parts[2] === 'consumers') return send(res, 201, await addConsumer(id, await readJson(req), by));
+        if (req.method === 'POST' && parts.length === 3 && parts[2] === 'consumers') return send(res, 201, await addConsumer(id, asObject(await readJson(req)), by));
         if (req.method === 'DELETE' && parts.length === 4 && parts[2] === 'consumers') {
           return (await removeConsumer(id, parts[3])) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'no such consumer' });
         }
-        if (req.method === 'POST' && parts.length === 3 && parts[2] === 'checks') return send(res, 201, await addCheck(id, await readJson(req), by));
+        if (req.method === 'POST' && parts.length === 3 && parts[2] === 'checks') return send(res, 201, await addCheck(id, asObject(await readJson(req)), by));
       } catch (e) {
         if (e instanceof CredentialError) return send(res, 400, { error: e.message });
+        if (e instanceof SyntaxError) return send(res, 400, { error: 'Body must be valid JSON.' });
         // The schema refuses a key-shaped secret_ref even if the API check were bypassed.
         if ((e as { code?: string }).code === '23514') return send(res, 400, { error: 'That value is not allowed here (it may look like a secret).' });
         throw e;

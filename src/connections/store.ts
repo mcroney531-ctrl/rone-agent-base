@@ -8,6 +8,7 @@ export type ConnectionStatus = 'pending' | 'active' | 'reauth_required' | 'expir
 export type Connection = {
   id: string;
   provider: string;
+  managed_by?: string;
   status: ConnectionStatus;
   account_label: string | null;
   scopes: string[];
@@ -17,7 +18,11 @@ export type Connection = {
   updated_at: string;
 };
 
-const COLS = 'id, provider, status, account_label, scopes, metadata, last_error, last_checked_at, updated_at';
+const COLS = 'id, provider, status, account_label, scopes, metadata, last_error, last_checked_at, updated_at, managed_by';
+// Ownership boundary: ops.connections is shared with Credential Watch (managed_by = 'manual'). Integration code
+// (Google OAuth, feeds) may only list, write status or metadata on rows it owns (managed_by = 'integration');
+// a manually tracked credential that happens to say provider 'google' is never treated as an integration row.
+const OWNED = `managed_by = 'integration'`;
 
 export async function getConnection(id: string): Promise<Connection | undefined> {
   return (await pool.query(`select ${COLS} from ops.connections where id = $1`, [id])).rows[0];
@@ -25,6 +30,11 @@ export async function getConnection(id: string): Promise<Connection | undefined>
 
 export async function listConnections(): Promise<Connection[]> {
   return (await pool.query(`select ${COLS} from ops.connections order by id`)).rows;
+}
+
+/** Integration-owned connections only: what integration code may iterate over. */
+export async function listIntegrationConnections(provider: string): Promise<Connection[]> {
+  return (await pool.query(`select ${COLS} from ops.connections where provider = $1 and ${OWNED} order by id`, [provider])).rows;
 }
 
 export async function ensurePending(id: string, provider: string): Promise<Connection> {
@@ -54,19 +64,19 @@ export async function markActive(id: string, f: { accountLabel?: string; scopes?
   await pool.query(
     `update ops.connections set status = 'active', last_error = null, last_checked_at = now(), updated_at = now(),
        account_label = coalesce($2, account_label), scopes = coalesce($3, scopes), metadata = metadata || coalesce($4, '{}'::jsonb)
-     where id = $1`,
+     where id = $1 and ${OWNED}`,
     [id, f.accountLabel ?? null, f.scopes ?? null, f.metadata ?? null],
   );
 }
 
 export async function mergeMetadata(id: string, metadata: Record<string, unknown>): Promise<void> {
-  await pool.query(`update ops.connections set metadata = metadata || $2::jsonb, updated_at = now() where id = $1`, [id, metadata]);
+  await pool.query(`update ops.connections set metadata = metadata || $2::jsonb, updated_at = now() where id = $1 and ${OWNED}`, [id, metadata]);
 }
 
 // The provider rejected our credential: only a human re-consenting fixes it. Shows up in the Attention Queue.
 export async function markReauthRequired(id: string, error: string): Promise<void> {
   await pool.query(
-    `update ops.connections set status = 'reauth_required', last_error = $2, last_checked_at = now(), updated_at = now() where id = $1`,
+    `update ops.connections set status = 'reauth_required', last_error = $2, last_checked_at = now(), updated_at = now() where id = $1 and ${OWNED}`,
     [id, error],
   );
 }
@@ -74,7 +84,7 @@ export async function markReauthRequired(id: string, error: string): Promise<voi
 // A check that reached the provider. Transient failures record the error but keep the status.
 export async function markChecked(id: string, error?: string): Promise<void> {
   await pool.query(
-    `update ops.connections set last_checked_at = now(), last_error = $2, updated_at = now() where id = $1`,
+    `update ops.connections set last_checked_at = now(), last_error = $2, updated_at = now() where id = $1 and ${OWNED}`,
     [id, error ?? null],
   );
 }

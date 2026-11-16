@@ -8,7 +8,7 @@
 // Endpoints are env-overridable so the whole lifecycle runs against a fake Google in CI.
 import { OpsError } from '../errors.js';
 import {
-  consumeOAuthState, ensurePending, getConnection, listConnections, loadSecret, markActive, markChecked, markReauthRequired,
+  consumeOAuthState, ensurePending, getConnection, listIntegrationConnections, loadSecret, markActive, markChecked, markReauthRequired,
   mergeMetadata, newOAuthState, saveSecret,
 } from './store.js';
 
@@ -257,8 +257,8 @@ export async function listEvents(connectionId: string, calendarId: string, timeM
 // Every active Google connection gets its Agent Ops calendar without a manual step: called right after
 // consent and at worker boot. Best-effort: a failure is logged and recorded, never blocks the caller.
 export async function ensureAgentOpsCalendars(connectionIds?: string[]): Promise<void> {
-  const ids = connectionIds ?? (await listConnections())
-    .filter((c) => c.provider === 'google' && c.status === 'active' && !c.metadata?.agentOpsCalendarId)
+  const ids = connectionIds ?? (await listIntegrationConnections('google'))
+    .filter((c) => c.status === 'active' && !c.metadata?.agentOpsCalendarId)
     .map((c) => c.id);
   for (const id of ids) {
     try {

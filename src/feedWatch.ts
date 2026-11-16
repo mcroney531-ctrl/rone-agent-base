@@ -82,14 +82,14 @@ export async function addSource(url: string, opts: { backfill?: number; fresh?: 
 export async function setSourcePaused(id: string, paused: boolean): Promise<boolean> {
   const { rowCount } = await pool.query(
     `update ops.connections set paused_at = case when $2 then coalesce(paused_at, now()) end, updated_at = now()
-      where id = $1 and provider = 'feed' and removed_at is null`, [id, paused]);
+      where id = $1 and provider = 'feed' and managed_by = 'integration' and removed_at is null`, [id, paused]);
   return rowCount === 1;
 }
 
 /** Soft remove: polling and cards stop; the checkpoint stays, so re-adding never replays history. */
 export async function removeSource(id: string): Promise<boolean> {
   const { rowCount } = await pool.query(
-    `update ops.connections set removed_at = now(), updated_at = now() where id = $1 and provider = 'feed' and removed_at is null`, [id]);
+    `update ops.connections set removed_at = now(), updated_at = now() where id = $1 and provider = 'feed' and managed_by = 'integration' and removed_at is null`, [id]);
   return rowCount === 1;
 }
 
@@ -100,7 +100,7 @@ export async function listSources() {
             (select count(*)::int from ops.feed_items i where i.connection_id = c.id) as items,
             (select count(*)::int from ops.feed_items i where i.connection_id = c.id and i.processing_state in ('pending', 'claimed')) as pending,
             (select max(i.judged_at) from ops.feed_items i where i.connection_id = c.id) as last_judged_at
-       from ops.connections c where c.provider = 'feed' and c.removed_at is null order by c.account_label`);
+       from ops.connections c where c.provider = 'feed' and c.managed_by = 'integration' and c.removed_at is null order by c.account_label`);
   return rows;
 }
 
@@ -160,7 +160,7 @@ type Source = { id: string; title: string; url: string; meta: SourceMeta };
 async function feedContext(): Promise<{ sources: Source[]; interests: string }> {
   const { rows } = await pool.query(
     `select c.id, c.account_label, c.metadata from ops.connections c join ops.agent_connections ac on ac.connection_id = c.id
-      where ac.agent_id = $1 and c.provider = 'feed' and c.removed_at is null and c.paused_at is null order by c.id`, [AGENT_ID]);
+      where ac.agent_id = $1 and c.provider = 'feed' and c.managed_by = 'integration' and c.removed_at is null and c.paused_at is null order by c.id`, [AGENT_ID]);
   return { sources: rows.map((r) => ({ id: r.id, title: r.account_label ?? r.id, url: r.metadata.url, meta: r.metadata })), interests: await getInterests() };
 }
 

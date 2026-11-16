@@ -134,6 +134,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-credentials.ts
 
+      - name: Credential Watch regressions (independent review of PR #31) - ownership, dates, input, constraint safety, secret detection
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-credentials-regressions.ts
+
       - name: Eval harness (checks, corpus, recorded run on the scripted model)
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs

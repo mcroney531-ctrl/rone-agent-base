@@ -2,7 +2,8 @@
 //
 // Deterministic and nonblocking: no workflow, no model, no probes. Nothing here writes connection status or
 // touches ops.agent_connections, so tracking a credential can never block an agent. Values are never stored:
-// secret_ref is where a secret lives, by name, and every free-text field refuses anything key-shaped.
+// secret_ref is where a secret lives, by name (DB-enforced, versioned CHECK); other free text gets a
+// best-effort API check. See docs/credential-watch.md "Secret handling" for the exact boundary.
 //
 // Warnings are the Attention Queue's `credential_expiry` item (sql/002_views.sql), one per credential, raised
 // again at each stage (14 days, 7 days, date passed). This module owns the only writer of the stored stage:
@@ -58,11 +59,18 @@ async function parseDate(c: pg.PoolClient, v: unknown): Promise<Date | null> {
   if (v === undefined || v === null || v === '' || v === 'none') return null;
   if (typeof v !== 'string') throw new CredentialError('Date must be YYYY-MM-DD or an ISO timestamp.');
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    // Validate the calendar day in JS first: an impossible day (2026-02-31) is the owner's typo, a 400, not a 500.
+    const [y, m, d] = v.split('-').map(Number);
+    const probe = new Date(Date.UTC(y, m - 1, d));
+    if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) throw new CredentialError(`${v} is not a real date.`);
     const { rows } = await c.query(`select (($1::date + 1)::timestamp at time zone $2) as t`, [v, OWNER_TZ()]);
     return rows[0].t;
   }
+  // A full timestamp must carry its offset (Z or ±hh:mm): without one, JS would read it in the SERVER's zone.
   const d = new Date(v);
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(v) || Number.isNaN(d.getTime())) throw new CredentialError('Date must be YYYY-MM-DD or an ISO timestamp.');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v) || Number.isNaN(d.getTime())) {
+    throw new CredentialError('Date must be YYYY-MM-DD, or an ISO timestamp with its offset (e.g. 2026-12-31T17:00:00Z).');
+  }
   return d;
 }
 
@@ -98,6 +106,12 @@ export type CredentialInput = {
   secretRef?: unknown; renewUrl?: unknown; notes?: unknown;
 };
 
+/** Request bodies must be JSON objects ("null", arrays and strings are a 400, not a crash). */
+export function asObject<T>(b: unknown): T {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) throw new CredentialError('Body must be a JSON object.');
+  return b as T;
+}
+
 export async function createCredential(input: CredentialInput): Promise<{ id: string }> {
   const name = text(input.name, 'Name', 80, true)!;
   const provider = text(input.provider, 'Provider', 40, true)!.toLowerCase();
@@ -112,6 +126,8 @@ export async function createCredential(input: CredentialInput): Promise<{ id: st
     const date = await parseDate(c, input.date);
     // Ids are never reused, not even a removed credential's: its consumers and checks stay with it.
     const base = `cred:${slug(name)}`;
+    // Serialize creates that share a base id: without this, concurrent same-name creates collide (review D5).
+    await c.query(`select pg_advisory_xact_lock(hashtext($1))`, [base]);
     const { rows: taken } = await c.query(`select id from ops.connections where id = $1 or id like $1 || '-%'`, [base]);
     const used = new Set(taken.map((r) => r.id));
     let id = base;
@@ -214,9 +230,13 @@ export async function addCheck(id: string, b: { scope?: unknown; result?: unknow
 }
 
 const STAGE_SQL = `ops.credential_stage(c.expires_at, now())`;
+// The calendar day to SHOW. A bare date is stored as the start of the next day (it means "through the end of
+// that day"), so display the instant just before the stored one, in the owner's timezone (review D3).
+export const DISPLAY_DAY = `to_char((c.expires_at - interval '1 second') at time zone '${(process.env.OWNER_TIMEZONE ?? 'America/New_York').replace(/'/g, "''")}', 'YYYY-MM-DD')`;
 const DETAIL_COLS = `c.id, c.display_name, c.provider, c.kind, c.managed_by, c.status, c.secret_ref, c.date_kind, c.expires_at,
   c.renew_url, c.notes, c.account_label, ${STAGE_SQL} as stage,
   case when c.expires_at is null then null else floor(extract(epoch from c.expires_at - now()) / 86400)::int end as days_left,
+  ${DISPLAY_DAY} as display_date,
   coalesce((select jsonb_agg(jsonb_build_object('id', x.id::text, 'consumer', x.consumer, 'confidence', x.confidence, 'evidence', x.evidence,
             'agentId', x.agent_id, 'notedAt', x.noted_at) order by x.confidence, x.noted_at)
      from ops.credential_consumers x where x.connection_id = c.id), '[]') as consumers,

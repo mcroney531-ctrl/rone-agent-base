@@ -124,7 +124,7 @@ with w as (
     from ops.state s where s.key = 'gmail.watch'
 ), acct as (
   select ac.agent_id, lower(c.account_label) as account
-    from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id where c.provider = 'google'
+    from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id where c.provider = 'google' and c.managed_by = 'integration'
 ), ev as (
   select a.agent_id, max(e.first_received_at) as last_push_at,
          count(*) filter (where e.first_received_at > now() - interval '24 hours') as pushes_24h,
@@ -239,7 +239,9 @@ union all
 -- Credential Watch (016): one item per tracked credential, from 14 days before its date. `since` is when the
 -- CURRENT stage's warning was raised (ops.credential_since), so each escalation re-raises the same item once.
 -- Only active, unpaused, unremoved rows: a connection that is already unhealthy shows as connection_problem.
-select 'credential_expiry', c.id, null, ops.credential_since(c.expires_at, c.alert_stage, c.alert_stage_since, now()),
+-- coalesce: a null since would make the item look new on every notifier tick (review M2); never let it.
+select 'credential_expiry', c.id, null, coalesce(ops.credential_since(c.expires_at, c.alert_stage, c.alert_stage_since, now()),
+         ops.credential_threshold(ops.credential_stage(c.expires_at, now()), c.expires_at)),
        coalesce(c.display_name, c.id)
   from ops.connections c
  where c.kind is not null and c.expires_at is not null and c.status = 'active'

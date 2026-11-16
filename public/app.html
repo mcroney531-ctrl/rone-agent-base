@@ -519,10 +519,12 @@ async function credentialsCard() {
   };
   const field = (ph, type = 'text') => h('input', { type, placeholder: ph, style: 'width:100%;font-size:16px;margin:4px 0' });
   const pick = (opts) => h('select', { style: 'font-size:16px;margin:4px 0' }, ...opts.map(([v, l]) => h('option', { value: v }, l)));
-  const fail = (res) => { toast(res.body?.error ?? 'Could not save'); return res.status >= 300; };
+  // True (and a toast) only when the request failed; a success never shows an error toast (review D4).
+  const fail = (res) => { if (res.status < 300) return false; toast(res.body?.error ?? 'Could not save'); return true; };
   const when = (c) => {
     if (!c.expires_at) return 'No date tracked';
-    const d = new Date(c.expires_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    // display_date = the day the owner picked; the stored instant is the start of the NEXT day (review D3).
+    const d = new Date(`${c.display_date}T12:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
     const left = c.days_left < 0 ? `${-c.days_left} days ago` : c.days_left === 0 ? 'today' : `in ${c.days_left} days`;
     return `${DATE_KIND[c.date_kind] ?? 'Date'}: ${d} (${left})`;
   };

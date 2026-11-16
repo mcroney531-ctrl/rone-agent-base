@@ -107,7 +107,7 @@ export async function handleGmailPush(body: unknown): Promise<IngressResult> {
     `select a.id from ops.connections c
        join ops.agent_connections ac on ac.connection_id = c.id
        join ops.agents a on a.id = ac.agent_id
-      where c.provider = 'google' and lower(c.account_label) = $1 and a.enabled and a.handler = 'inbox_triage'
+      where c.provider = 'google' and c.managed_by = 'integration' and lower(c.account_label) = $1 and a.enabled and a.handler = 'inbox_triage'
       order by a.id`, [account]);
   if (!agents.length) {
     await pool.query(`update ops.ingress_events set state = 'ignored', detail = 'no Inbox Triage agent for this mailbox' where id = $1`, [ev.id]);
