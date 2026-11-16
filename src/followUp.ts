@@ -144,7 +144,7 @@ type Ctx = { connectionId: string; owner: string };
 async function followUpContext(agent: AgentRow): Promise<Ctx> {
   const { rows } = await pool.query(
     `select c.id, c.account_label from ops.agent_connections ac join ops.connections c on c.id = ac.connection_id
-      where ac.agent_id = $1 and c.provider = 'google' order by c.id limit 1`, [agent.id]);
+      where ac.agent_id = $1 and c.provider = 'google' and c.managed_by = 'integration' order by c.id limit 1`, [agent.id]);
   if (!rows[0]) throw new OpsError('validation', `agent ${agent.id} has no Google connection`);
   return { connectionId: rows[0].id, owner: (rows[0].account_label ?? '').toLowerCase() };
 }

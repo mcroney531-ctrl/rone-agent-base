@@ -278,7 +278,8 @@ export async function attentionDetail(kind: string, ref: string) {
     const c = await getCredential(ref);
     if (c) {
       add('Credential', c.display_name ?? c.id); add('Provider', c.provider); add('Kind', humanize(c.kind));
-      add(DATE_KIND_LABEL[c.date_kind as DateKind] ?? 'Date', c.expires_at ? fmtDay(new Date(c.expires_at).toISOString()) : null);
+      // display_date is the calendar day the owner picked (a bare date is stored as the start of the next day).
+      add(DATE_KIND_LABEL[c.date_kind as DateKind] ?? 'Date', c.display_date ? new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(`${c.display_date}T12:00:00Z`)) : null);
       add('Where it is stored (known)', c.secret_ref);
       add('Renewal notes', c.notes);
       const cons = c.consumers as { consumer: string; confidence: string; evidence: string }[];

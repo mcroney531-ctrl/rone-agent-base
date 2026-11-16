@@ -77,7 +77,7 @@ try {
   check('key-shaped values are refused with 400 (sk-ant, JWT, github_pat, ghp_ in notes, hex secret, sb_secret_ as a name)', badStatus.every((s) => s === 400), badStatus);
   const okRef = await w.http('POST', '/credentials', { name: 'Ref style check', provider: 'anthropic', secretRef: 'railway:task-scheduler-production/worker/SUPABASE_SERVICE_ROLE_KEY' });
   check('a location name with separators is accepted (no false positive on "task-…")', okRef.status === 201, okRef.body);
-  const direct = await db.query(`update ops.connections set secret_ref = 'eyJhbGciOiJIUzI1NiJ9.payload' where id = $1`, [okRef.body.id]).then(() => 'ok', (e) => e.code);
+  const direct = await db.query(`update ops.connections set secret_ref = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.c2ln' where id = $1`, [okRef.body.id]).then(() => 'ok', (e) => e.code);
   check('the schema itself refuses a key-shaped secret_ref (direct SQL → check violation)', direct === '23514', direct);
   const seeded = fs.readdirSync('sql').some((f) => /cred:/.test(fs.readFileSync(`sql/${f}`, 'utf8')));
   check('no real credential inventory in sql/ (public repo)', !seeded);
@@ -196,7 +196,7 @@ try {
   const c1 = await w.http('POST', `/credentials/${encodeURIComponent(pt)}/consumers`, { consumer: 'modest-determination → web', confidence: 'confirmed', evidence: 'Railway variable name SUPABASE_SERVICE_ROLE_KEY' });
   const c2 = await w.http('POST', `/credentials/${encodeURIComponent(pt)}/consumers`, { consumer: 'rone-agent-base → worker', confidence: 'candidate', evidence: 'SUPABASE_PUBLISHABLE_KEY format unverified' });
   const ch = await w.http('POST', `/credentials/${encodeURIComponent(pt)}/checks`, { scope: 'Railway variable names', result: '2 of 9 projects checked' });
-  const badC = await w.http('POST', `/credentials/${encodeURIComponent(pt)}/consumers`, { consumer: 'x', confidence: 'confirmed', evidence: 'eyJhbGciOiJIUzI1NiJ9.leaked' });
+  const badC = await w.http('POST', `/credentials/${encodeURIComponent(pt)}/consumers`, { consumer: 'x', confidence: 'confirmed', evidence: 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZSJ9.c2ln' });
   const det = (await w.http('GET', `/attention/credential_expiry/${encodeURIComponent(pt)}`)).body;
   const f = Object.fromEntries((det?.facts ?? []).map((x: any) => [x.label, x.value]));
   check('consumers and checks recorded; a key-shaped evidence string is refused', c1.status === 201 && c2.status === 201 && ch.status === 201 && badC.status === 400, [c1.body, c2.body, ch.body, badC.body]);
@@ -239,6 +239,13 @@ try {
   await sleep(7000); // past both retry times
   check('stale work: a delivery waiting to retry is never sent after the credential is retired or re-dated out of the window',
     (await pushes(flaky, s1)).length === 0 && (await pushes(flaky, s2)).length === 0, { s1: await pushes(flaky, s1), s2: await pushes(flaky, s2) });
+  // ...and never even CLAIMED again: the claim step only takes deliveries for items still open. Without that
+  // filter the send would fail on the missing item and this test would still pass on push counts alone
+  // (review mutation M10), so assert the attempt count did not move.
+  const stale = await db.query(`select d.ref, d.attempts, d.status from ops.notification_deliveries d join ops.push_devices p on p.id = d.device_id
+      where p.label = 'Windows · Chrome' and d.ref = any($1)`, [[s1, s2]]);
+  check('stale work: the waiting deliveries were not claimed again (attempts still 1, still failed)',
+    stale.rows.length === 2 && stale.rows.every((r) => r.attempts === 1 && r.status === 'failed'), stale.rows);
   const s3 = await create('After Flaky Key', 10 * D);
   await expectPushes(flaky, s3, 1, 'the retried device still receives current items');
 
