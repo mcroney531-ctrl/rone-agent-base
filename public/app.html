@@ -124,7 +124,13 @@ function h(tag, attrs = {}, ...kids) {
   for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
   return el;
 }
-const render = (...nodes) => { $view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); };
+// Unsaved edits: typing in any field on the current screen marks it dirty. A dirty screen is never re-rendered or
+// reloaded behind the user's back (coming back to the tab, a new deploy); only their own action (submit, navigate,
+// Refresh) replaces it. Nothing is stored: field contents never leave the page.
+let dirty = false;
+$view.addEventListener('input', () => { dirty = true; });
+$view.addEventListener('change', () => { dirty = true; });
+const render = (...nodes) => { dirty = false; $view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); };
 let toastTimer;
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -164,12 +170,18 @@ const BUILD = cfg.build;
 const BUILD_CHECK_MAX_AGE_MS = 5 * 60_000;
 let buildGate = Promise.resolve();
 let lastBuildCheck = Date.now(); // the page just loaded this build
+let reloadPending = false;        // a newer build is out, but the user was mid-form
 function checkBuild() {
   lastBuildCheck = Date.now();
   buildGate = (async () => {
     try {
       const now = await (await fetch('/app/config', { cache: 'no-store' })).json();
-      if (BUILD && now.build && now.build !== BUILD) { location.reload(); await new Promise(() => {}); } // hold every call until the reload
+      if (BUILD && now.build && now.build !== BUILD) {
+        // Mid-form: don't throw the user's typing away. Requests carry on (the compat contract covers an older page);
+        // the reload happens on their next navigation instead.
+        if (dirty) { reloadPending = true; return; }
+        location.reload(); await new Promise(() => {}); // hold every call until the reload
+      }
     } catch { /* offline or blip: carry on with this build */ }
   })();
   return buildGate;
@@ -660,6 +672,7 @@ function handleErr(err) {
 }
 
 async function route() {
+  if (reloadPending) { location.reload(); return; } // they're done with the form (submitted or navigated)
   if (!sb) return render(h('div', { class: 'empty' }, h('b', {}, 'Not configured'), 'Mobile sign-in is not set up on this server.'));
   if (!session) return loginScreen();
   document.getElementById('tabs').hidden = false;
@@ -688,7 +701,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/sw.js',
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   checkBuild();
-  if (session) route();
+  if (session && !dirty) route(); // keep a half-filled form as it is; Refresh still re-renders on purpose
 });
 addEventListener('pageshow', (e) => { if (e.persisted) checkBuild(); }); // restored from the back/forward cache
 addEventListener('focus', () => { if (Date.now() - lastBuildCheck > 30_000) checkBuild(); }); // clicked back into the window
