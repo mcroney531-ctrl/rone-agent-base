@@ -25,9 +25,10 @@ function check(name: string, cond: boolean, detail?: unknown) {
 }
 const post = (p: string, body?: unknown) => fetch(`${EXTERNALS}${p}`, { method: 'POST', body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
 type It = { id: string; title: string; text: string; link?: string; date?: string };
+const NOW_DATE = new Date().toUTCString(); // items default to "published now", so the old-item rule never makes them old
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const rss = (title: string, items: It[]) => `<?xml version="1.0"?><rss version="2.0"><channel><title>${esc(title)}</title><link>https://example.org/</link>${items.map((i) =>
-  `<item><guid>${i.id}</guid><title>${esc(i.title)}</title><link>${i.link ?? `https://example.org/${i.id}`}</link><pubDate>${i.date ?? 'Mon, 09 Nov 2026 12:00:00 GMT'}</pubDate><description>${esc(i.text)}</description></item>`).join('')}</channel></rss>`;
+  `<item><guid>${i.id}</guid><title>${esc(i.title)}</title><link>${i.link ?? `https://example.org/${i.id}`}</link><pubDate>${i.date ?? NOW_DATE}</pubDate><description>${esc(i.text)}</description></item>`).join('')}</channel></rss>`;
 const setFeed = (name: string, b: Record<string, unknown>) => post(`/feeds/admin/set/${name}`, b);
 const feedUrl = (name: string) => `${EXTERNALS}/feeds/${name}`;
 
@@ -180,6 +181,26 @@ try {
   await setFeed('alpha', { body: rss('Alpha Blog', churned) });
   await run();
   check('reorder + whitespace + markup + tracking link + date bump → no new revision, no re-judgment', (await item(srcA, 'a4')).revision === 1 && judgeCalls().length === before, await item(srcA, 'a4'));
+
+  // ---- a feed rotating an OLD post back into its window is not news ----
+  {
+    const n0 = judgeCalls().length;
+    A.push({ id: 'old1', title: 'Agents retrospective from 2024', text: 'An old post about agents and Postgres.', date: 'Mon, 18 Nov 2024 23:00:00 GMT' });
+    A.push({ id: 'undated', title: 'Durable agents, no date', text: 'Agents.', date: '' });
+    await setFeed('alpha', { body: rss('Alpha Blog', A) });
+    await run();
+    const old1 = await item(srcA, 'old1');
+    const und = await item(srcA, 'undated');
+    check('an old post (published long before we started watching) rotating into the feed is baseline: not judged, no card',
+      old1.change_kind === 'baseline' && old1.processing_state === 'skipped' && !(await cards()).some((c) => /retrospective/.test(c.title)), old1);
+    check('…while a first-seen item with no usable date is still treated as new', und.change_kind === 'new' && und.processing_state === 'judged'
+      && judgeCalls().length === n0 + 1, { und, calls: judgeCalls().length - n0 });
+    A.splice(A.findIndex((i) => i.id === 'undated'), 1);
+    A.splice(A.findIndex((i) => i.id === 'old1'), 1);
+    await setFeed('alpha', { body: rss('Alpha Blog', A) });
+    await run();
+    for (const c of await cards()) if (/Durable agents, no date/.test(c.title)) await call('POST', `/attention/feed_item/${c.ref}/dismiss`, { requestId: `d-${c.ref}` });
+  }
 
   // ---- a real edit → "Updated" card for revision 2, with what changed ----
   await call('POST', `/attention/feed_item/${cs[0].ref}/dismiss`, { requestId: 'd1' });

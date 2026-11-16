@@ -67,6 +67,7 @@ The question: is the base provider-agnostic, or "a really good Google machine"? 
   - `change_kind`: baseline | new | changed;
   - `processing_state`: pending | claimed | judged | skipped.
   `revision` increments when contentHash changes. **A claim is for (item, revision).** A judgment commits only if that revision is still current, so a run judging revision 1 can never mark revision 2 judged; the stale judgment is discarded and revision 2 gets its own. The previous title and text are kept so a card can say what changed. Claims are released when the owning run is dead for good, as in Inbox Triage.
+- **A feed is a window, not a history** (found in production, Nov 16: the DBOS blog rotated 2024 posts back into its feed, and two surfaced as "New"). An item seen for the first time is new only if it was published around or after the day the source was added (7-day grace). An older one is filed as baseline, never judged. Items without a date are still treated as new. Edits to old items are still judged. Migration `017` fixed the one old item still queued.
 - **Adding a source baselines what's there**, so you don't get its history. Re-adding a removed source keeps its checkpoint and baselines anything new to us; nothing is replayed. **Backfill N** sends the newest N items through the *same* judgment pipeline; there is no second, historical path.
 - **Judgment:**
   - One batched call per run, at most 10 items per source.
