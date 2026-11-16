@@ -78,6 +78,9 @@ alter table ops.connections drop constraint if exists connections_date_kind_chec
 alter table ops.connections add constraint connections_date_kind_check
   check (date_kind is null or date_kind in ('expires', 'provider_target', 'review_by'));
 -- Unversioned constraint from the first V1A deploy: replaced by connections_secret_ref_v1 (no-op once dropped).
+-- Atomic: this whole file runs as ONE transaction (applySql sends it as one multi-statement query), so if the
+-- v1 add below fails, this drop rolls back too. Old protection or new, never neither; boot fails closed.
+-- Keep it that way: no COMMIT in this file, and never move this drop into its own statement.
 alter table ops.connections drop constraint if exists connections_secret_ref_check;
 -- Added ONCE (validating existing rows at that moment), never dropped and re-added on boot.
 do $$ begin

@@ -123,6 +123,32 @@ try {
   await db.query(`update ops.connections set secret_ref = null where id = $1`, [g]);
   if (!booted) await restart();
 
+  // ---- D8: the constraint swap is atomic and fails closed ----
+  // Pre-fix production state: the old unversioned constraint, no v1. A stored row passes the old rules but
+  // fails v1 (an AWS key id: no 32-char run, no prefix the old rules knew). Booting the new code must not
+  // leave the table with neither constraint: 016 runs as ONE transaction (applySql sends the file as one
+  // multi-statement query, executed as a single implicit transaction), so the failed add of v1 rolls back
+  // the drop of the old constraint, and the worker refuses to boot (fail closed).
+  const OLD_RULES = `secret_ref is null or not (secret_ref ~* '(^|[^a-z0-9])(sk-(ant-)?[a-z0-9_-]{16,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,})' or secret_ref ~ 'eyJ[A-Za-z0-9_-]{8,}' or secret_ref ~ '[A-Za-z0-9]{32,}')`;
+  await w.kill();
+  await db.query(`alter table ops.connections drop constraint if exists connections_secret_ref_v1`);
+  await db.query(`alter table ops.connections drop constraint if exists connections_secret_ref_check`);
+  await db.query(`alter table ops.connections add constraint connections_secret_ref_check check (${OLD_RULES})`);
+  await db.query(`update ops.connections set secret_ref = 'AKIA' || 'ABCDEFGHIJKLMNOP' where id = $1`, [g]);
+  let swapBooted = true;
+  try { w = await startWorker({ id: `regress-swap-${Date.now()}`, port: PORT, dbUrl: url, env }); } catch { swapBooted = false; }
+  const afterFail = (await con()).rows.map((r) => `${r.conname}:${r.convalidated}`);
+  check('D8 atomic: when v1 cannot be added, the boot fails AND the previous constraint is still in place (never neither)',
+    !swapBooted && afterFail.length === 1 && afterFail[0] === 'connections_secret_ref_check:true', { swapBooted, afterFail });
+  const stillEnforced = await db.query(`update ops.connections set secret_ref = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9' where id = $1`, [g]).then(() => 'ok', (e) => e.code);
+  check('D8 atomic: the previous constraint still enforces after the failed swap', stillEnforced === '23514', stillEnforced);
+  await db.query(`update ops.connections set secret_ref = null where id = $1`, [g]);
+  w = await startWorker({ id: `regress-swapped-${Date.now()}`, port: PORT, dbUrl: url, env });
+  await sleep(1500);
+  const afterOk = (await con()).rows.map((r) => `${r.conname}:${r.convalidated}`);
+  check('D8 atomic: once the row is cleaned up, the next boot swaps to v1 (old constraint gone, v1 validated)',
+    afterOk.length === 1 && afterOk[0] === 'connections_secret_ref_v1:true', afterOk);
+
   // ---- secret detection: defense in depth (API on free text; frozen v1 CHECK on secret_ref) ----
   const sample = (b: number) => randomBytes(b).toString('base64');
   const positives = ['AKIA' + 'ABCDEFGHIJKLMNOP', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'sk_test_' + 'a1B2c3D4e5F6g7H8i9J0k1L2', 'glpat-' + 'xY12abCDef34GHij56KL',

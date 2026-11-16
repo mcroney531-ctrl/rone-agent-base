@@ -58,7 +58,9 @@ A deadline tracker for credentials. It tracks dates, sends warnings, and follows
 | Name, notes, renewal URL, consumer, evidence, check scope and result | An **API check**, `ops.looks_like_secret`: the same patterns without the hex rule, so commit SHAs and page ids are allowed. | Best effort; not enforced in the database. |
 | API responses and notifications | Never contain a value, because none is stored. The lock-screen text never contains the credential's name. The push payload's `tag`/`url` carry the credential id (a slug of its name), which the phone doesn't display. | By design |
 
-**Changing the database check.** `ops.secret_ref_ok_v1` is frozen. A CHECK is validated only when it's added, so editing the function would apply new rules to new writes while old rows went unchecked. Re-adding the constraint on every boot (the original V1A did this) can stop every replica from booting, and also leaves the table with no constraint at all once the drop has succeeded. Instead, the constraint is added once and never re-added on boot. To change the rules:
+**Changing the database check.** `ops.secret_ref_ok_v1` is frozen. A CHECK is validated only when it's added, so editing the function would apply new rules to new writes while old rows went unchecked. Re-adding the constraint on every boot (the original V1A did this) can stop every replica from booting. Instead, the constraint is added once and never re-added on boot.
+
+**The swap is atomic and fails closed.** `applySql` sends each migration file as one multi-statement query, which Postgres runs as a single implicit transaction. So if v1 can't be added, the drop of the old constraint rolls back with it: the table keeps the old protection or gets the new one, never neither, and the worker refuses to boot. `scripts/test-credentials-regressions.ts` proves this ("D8 atomic"). The same test fails if the drop is run as a separately committed statement. To change the rules:
 1. Create `ops.secret_ref_ok_v2`.
 2. In a new migration, add `connections_secret_ref_v2` as `NOT VALID`.
 3. Clean up any rows it flags.
