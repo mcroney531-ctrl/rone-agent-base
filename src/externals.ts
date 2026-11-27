@@ -251,6 +251,7 @@ async function fakeGoogle(req: http.IncomingMessage, res: http.ServerResponse, u
   return send(res, 404, { error: { code: 404 } }), true;
 }
 
+const SUPABASE_SEEN: string[] = []; // every token the fake Supabase Auth was asked about
 const PUSHES: { id: string; headers: Record<string, string>; body: string }[] = [];
 const FLAKY = { count: 0 };
 
@@ -495,8 +496,10 @@ http
         return res.writeHead(201).end();
       }
       // Fake Supabase Auth: just enough of GET /auth/v1/user to test the owner guard.
+      if (path === '/supabase/admin/seen') return send(res, 200, SUPABASE_SEEN);
       if (path === '/supabase/auth/v1/user') {
         const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+        SUPABASE_SEEN.push(token);
         if (!req.headers.apikey) return send(res, 401, { message: 'No API key found in request' });
         const users: Record<string, string> = { 'owner-session': 'Owner@Example.com', 'other-session': 'someone@else.com' };
         return users[token] ? send(res, 200, { id: token, email: users[token] }) : send(res, 403, { code: 403, msg: 'invalid JWT' });

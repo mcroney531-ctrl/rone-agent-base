@@ -13,7 +13,7 @@ import {
 import { deeperPrep } from './calendarPrep.js';
 import { briefView, setFeedback } from './briefs.js';
 import { listDevices, registerDevice, removeDevice, sendTest, startNotifier, vapidKeys } from './notify.js';
-import { authenticate, callerLabel, publicAuthConfig } from './auth.js';
+import { agentAllowed, authenticate, callerLabel, publicAuthConfig } from './auth.js';
 import { actOnAttention, AgentPausedError, assertNotPaused, attentionDetail, listAgents, listAttention, runAgentNow, setPaused } from './attention.js';
 import { markStopped, registerExecutor, startLivenessLoops, sweepDeadExecutors } from './recovery.js';
 import { checkGoogleConnection, completeGoogleAuth, ensureAgentOpsCalendar, ensureAgentOpsCalendars, startGoogleAuth } from './connections/google.js';
@@ -218,7 +218,15 @@ const server = http.createServer(async (req, res) => {
 
     const auth = await authenticate(req);
     if (!auth.ok) return send(res, auth.status, { error: auth.error });
+    if (auth.caller.kind === 'agent' && !agentAllowed(req.method, parts)) {
+      return send(res, 403, { error: 'not permitted for this identity' });
+    }
     const by = callerLabel(auth.caller);
+
+    // Which identity this request arrived as. Never echoes the token.
+    if (req.method === 'GET' && parts[0] === 'credentials' && parts[1] === 'whoami' && parts.length === 2) {
+      return send(res, 200, { identity: auth.caller.kind === 'agent' ? auth.caller.id : auth.caller.kind });
+    }
 
     // Needs You: GET /attention, GET /attention/:kind/:ref, POST /attention/:kind/:ref/:action
     if (parts[0] === 'attention') {

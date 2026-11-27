@@ -89,3 +89,14 @@ A deadline tracker for credentials. It tracks dates, sends warnings, and follows
 ## Not in V1A
 
 Active probing, rotation, a dependency graph, or any new workflow. The rotation invariant is recorded for later: no destructive credential change without reviewed dependency coverage and an explicit account of everything else that loses access.
+
+## Scoped agent identity (`claude-credentials`)
+
+Claude maintains the inventory as its own identity, not as the owner.
+
+- **Token delivery.** `CREDENTIALS_AGENT_TOKEN` is set on the worker. The same value is stored as a *network secret* on the Claude Code cloud environment, scoped to the worker host and the `/credentials` path. The environment's proxy attaches it outside Claude's sandbox, so Claude never holds the value and cannot present any other identity on those routes.
+- **Default deny.** `AGENT_ALLOWED` in `src/auth.ts` lists the exact routes the identity may call. Every other route, including routes added later, returns 403 before any handler runs. Step 1 allows only `GET /credentials/whoami`.
+- **Never forwarded.** The agent token is matched before the Supabase session check, so a live agent token is never sent to Supabase Auth.
+- **Fails closed.** A token shorter than 32 characters is ignored, so the identity does not exist.
+- **Revocation.** Remove or change the Railway variable. The old token then returns 401 on the next deploy. A revoked token is treated like any unknown bearer token: it is checked against Supabase Auth, which rejects it.
+- **Tests.** `scripts/test-agent-identity.ts` covers whoami, near-miss tokens, the 403s with no side effects, the Supabase leak, unset/short/rotated tokens. A mutation that removes the gate is caught.
