@@ -100,6 +100,21 @@ The question: is the base provider-agnostic, or "a really good Google machine"? 
   - no profile → no judgment.
   Eval: `feed-watch` suite (24 scenarios).
 
+### Model-provider outages (Claude credits / key)
+
+Found in production twice: on Nov 23 the Anthropic account ran out of credits for ~40 minutes, and on Nov 24–27 an expired key caused 283 failed runs. Recovery already worked: claims and dead-run repair meant later runs triaged the mail exactly once. What was missing was a clear signal instead of hundreds of "Run failed" cards.
+
+- **Detected from the provider's real answers, not a guessed balance.** Anthropic has no cheap balance endpoint for an ordinary API key. Model middleware (`src/providerHealth.ts`), inside the durable step so a replayed checkpoint never counts, records each call:
+  - a credit/billing refusal → `credits_exhausted`;
+  - a rejected key → `auth_failed`;
+  - a success → `ok`.
+  Overloads, 5xx and timeouts are not outages of this kind.
+- **One Needs You item per outage** (`ops.provider_status`, one row per provider): "Claude credits unavailable" or "Claude API key rejected". It says since when and how many calls/runs failed, and links to the Anthropic billing or API keys page. It never buys credits.
+  - **It clears itself** on the next successful call.
+  - **"Got it"** hides it for that outage only; a new outage raises it again.
+- **Run history is untouched.** Credits failures get their own class (`provider_billing`). The failed runs stay in `ops.runs`/`ops.v_runs`, but their individual "Run failed" cards are folded into the provider item, matched by the outage window in `ops.provider_outages`.
+- **Tests:** `test-provider-health` in CI (14 checks). The scripted model can fail with Anthropic's exact credits response at runtime.
+
 ### External event ingress: Gmail push (V1)
 
 The base's first event from outside: a real provider pushes, we turn it into durable work. **A push is a wake-up signal, not a processing path.** The webhook never reads or interprets mail. It records the event and starts the existing Inbox Triage run, which reads from its own history cursor. The 20-minute schedule stays as the recovery path: Google may delay or drop a notification.

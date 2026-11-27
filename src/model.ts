@@ -5,6 +5,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { anthropic } from '@ai-sdk/anthropic';
 import { durableCalls } from '@dbos-inc/vercel-ai';
 import { DBOS } from '@dbos-inc/dbos-sdk';
+import { providerHealth } from './providerHealth.js';
 
 // Every model call becomes a DBOS step: its output is checkpointed, so after a crash the
 // recovered workflow replays completed calls from Postgres instead of paying for them again.
@@ -12,7 +13,8 @@ export function agentModel(modelId: string): LanguageModel {
   const base = process.env.ANTHROPIC_API_KEY ? anthropic(modelId) : scriptedMock();
   return wrapLanguageModel({
     model: base,
-    middleware: durableCalls({ retriesAllowed: true, maxAttempts: 3, intervalSeconds: 1, timeoutMS: 60_000 }),
+    // providerHealth sits INSIDE the durable step: it sees only real provider calls, never a replayed checkpoint.
+    middleware: [durableCalls({ retriesAllowed: true, maxAttempts: 3, intervalSeconds: 1, timeoutMS: 60_000 }), providerHealth],
   });
 }
 
@@ -37,12 +39,20 @@ function scriptedMock() {
       const turn = options.prompt.filter((m) => m.role === 'assistant').length;
       const runTag = `${process.pid}:${++seq}`;
       if (process.env.MOCK_CALL_LOG) fs.appendFileSync(process.env.MOCK_CALL_LOG, `${Date.now()} wf=${DBOS.workflowID} turn=${turn} ${runTag}\n`);
+      // MOCK_FAIL fixes the failure for the process; MOCK_FAIL_FILE lets a test switch it on and off at runtime.
+      const failMode = process.env.MOCK_FAIL
+        || (process.env.MOCK_FAIL_FILE && fs.existsSync(process.env.MOCK_FAIL_FILE) ? fs.readFileSync(process.env.MOCK_FAIL_FILE, 'utf8').trim() : '');
       const delay = Number(process.env.MOCK_DELAY_MS ?? 0);
       if (delay) await new Promise((r) => setTimeout(r, delay));
-      if (process.env.MOCK_FAIL === 'auth') {
+      if (failMode === 'auth') {
         throw new APICallError({ message: 'invalid x-api-key', url: 'mock://', requestBodyValues: {}, statusCode: 401, isRetryable: false });
       }
-      if (process.env.MOCK_FAIL === 'overloaded') {
+      if (failMode === 'credits') {
+        // Anthropic's real answer when the account has no credits (400, non-retryable).
+        throw new APICallError({ message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+          url: 'mock://', requestBodyValues: {}, statusCode: 400, isRetryable: false, responseBody: '{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}' });
+      }
+      if (failMode === 'overloaded') {
         throw new APICallError({ message: 'overloaded', url: 'mock://', requestBodyValues: {}, statusCode: 529, isRetryable: true });
       }
 

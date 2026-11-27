@@ -101,6 +101,21 @@ const KINDS: Record<string, { severity: Severity | ((r: Row) => Severity); title
       .filter(Boolean).join('\n'),
     actions: (r) => [{ ...A.open, label: 'Open', ...(r.extra?.link ? { url: String(r.extra.link) } : {}) }, A.notRelevant, { ...A.dismiss, label: 'Got it' }],
   },
+  // Anthropic refusing every call (src/providerHealth.ts). Agents keep running on their schedules and pick up
+  // their work once a call succeeds, which also clears this item. We never buy credits; we only link there.
+  provider_problem: {
+    severity: 'problem',
+    title: (r) => (r.extra?.state === 'credits_exhausted' ? 'Claude credits unavailable' : 'Claude API key rejected'),
+    summary: (r) => `Since ${fmtWhen(r.since)}: ${r.extra?.failures ?? 0} failed call(s) across ${r.extra?.runs ?? 0} run(s). `
+      + (r.extra?.state === 'credits_exhausted' ? 'Add credits or turn on auto-reload.' : 'Check or rotate the API key on the worker.')
+      + ' Agents keep retrying on schedule and catch up once Claude answers again; this clears itself then.',
+    actions: (r) => [
+      r.extra?.state === 'credits_exhausted'
+        ? { ...A.open, label: 'Open billing', url: 'https://console.anthropic.com/settings/billing' }
+        : { ...A.open, label: 'Open API keys', url: 'https://console.anthropic.com/settings/keys' },
+      { ...A.dismiss, label: 'Got it' },
+    ],
+  },
   run_failed: { severity: 'problem', title: () => 'Run failed', actions: (r) => (r.agent_id ? [A.runNow, A.dismiss] : [A.dismiss]) },
   action_failed: {
     severity: 'problem',
@@ -162,6 +177,11 @@ function credTitle(r: Row): string {
 const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due']); // only resolving them clears them
 const FALLBACK = { severity: 'problem' as Severity, title: (r: Row) => humanize(r.kind), actions: () => [A.dismiss] };
 
+function fmtWhen(v?: Date | string | null): string {
+  if (!v) return '?';
+  return new Intl.DateTimeFormat('en-US', { timeZone: process.env.OWNER_TIMEZONE ?? 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(v));
+}
+
 function fmtDay(iso?: string): string {
   if (!iso) return '?';
   return new Intl.DateTimeFormat('en-US', { timeZone: process.env.OWNER_TIMEZONE ?? 'America/New_York', month: 'short', day: 'numeric' }).format(new Date(iso));
@@ -199,6 +219,10 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
                          'last_owner_message_at', f.last_owner_message_at, 'due_at', f.due_at, 'explicit_date', f.explicit_date,
                          'evidence', f.source_evidence, 'nudges', f.nudges)
                    from ops.follow_up_items f where f.id::text = q.ref)
+              when q.kind = 'provider_problem' then
+                (select jsonb_build_object('state', p.state, 'failures', p.failures,
+                         'runs', (select count(*) from ops.runs r where r.outcome = 'failed' and r.error_class in ('provider_billing', 'provider_auth') and r.finished_at >= p.since - interval '2 minutes'))
+                   from ops.provider_status p where p.provider = q.ref)
               when q.kind = 'feed_item' then
                 (select jsonb_build_object('source', c.account_label, 'source_url', c.metadata->>'url', 'title', i.title, 'link', i.link,
                          'why', i.why, 'change_kind', i.change_kind, 'prev_title', i.prev_title, 'prev_text', i.prev_text, 'text', left(i.text, 600),

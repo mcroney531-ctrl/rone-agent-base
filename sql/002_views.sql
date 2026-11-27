@@ -169,6 +169,15 @@ select 'action_failed', a.id::text, a.agent_id, a.updated_at, a.error
 union all
 select 'run_failed', v.workflow_id, v.agent_id, v.finished_at, coalesce(v.error_class, '?') || ': ' || coalesce(v.error_message, v.dbos_status)
   from ops.v_runs v where v.run_state = 'failed' and v.finished_at > now() - interval '24 hours'
+   -- Covered by the provider item (one card per outage, not one per failed run). The runs stay in history.
+   and not (v.error_class in ('provider_billing', 'provider_auth') and exists (
+         select 1 from ops.provider_outages o
+          where v.finished_at >= o.started_at - interval '2 minutes' and (o.ended_at is null or v.finished_at <= o.ended_at + interval '2 minutes')))
+union all
+-- The model provider (Anthropic) is refusing calls: no credits, or the key was rejected. One item per outage;
+-- it clears itself when a call succeeds.
+select 'provider_problem', p.provider, null, p.since, p.last_error
+  from ops.provider_status p where p.state <> 'ok'
 union all
 select 'action_stuck', a.id::text, a.agent_id, a.decided_at,
        'approved but executor ' || coalesce(v.run_state, 'never started')

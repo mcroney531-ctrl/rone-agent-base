@@ -9,7 +9,7 @@
         "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 7665,
+      "recoverMs": 7682,
       "finalState": {
         "run_state": "succeeded",
         "recovery_attempts": "1",
@@ -468,7 +468,7 @@
       "executorHardDown": {
         "status": "failed",
         "error": "provider_unavailable: provider 503: injected fault (503)",
-        "run_state": "failed",
+        "run_state": "running",
         "error_class": "provider_unavailable"
       },
       "connectionExpired": {
@@ -485,18 +485,13 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "e7cf1387-6573-4aaf-8471-12a05675b8f7",
+          "ref": "81c958c6-8173-4b57-8c56-8fb7f0e04558",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {
           "kind": "connection_problem",
           "ref": "fake_provider:spike",
           "detail": "expired: refresh token expired"
-        },
-        {
-          "kind": "run_failed",
-          "ref": "manual-spike-agent-auth",
-          "detail": "provider_auth: invalid x-api-key"
         },
         {
           "kind": "run_failed",

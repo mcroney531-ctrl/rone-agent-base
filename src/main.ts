@@ -75,6 +75,7 @@ await applySql('015_feed_watch.sql');
 await applySql('016_credentials.sql');
 await applySql('017_feed_old_items.sql');
 await applySql('018_credential_managed_writes.sql');
+await applySql('019_provider_status.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
