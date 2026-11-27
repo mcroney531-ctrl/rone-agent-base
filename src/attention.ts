@@ -366,7 +366,7 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
       if (kind !== 'credential_expiry') return { ok: false, status: 400, message: 'Unknown action.' };
       if (!choice) return { ok: false, status: 400, message: 'Choose the new date.' };
       try {
-        const r = await renewCredential(ref, choice);
+        const r = await renewCredential(ref, choice, by);
         return { ok: r.ok, status: r.ok ? 200 : 400, message: r.message };
       } catch (e) {
         return { ok: false, status: 400, message: (e as Error).message };
@@ -374,7 +374,7 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
     }
     case 'not_needed':
       if (kind === 'credential_expiry') {
-        return (await retireCredential(ref)) ? { ok: true, status: 200, message: 'Retired. No more warnings for it.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
+        return (await retireCredential(ref, { label: by, agent: false })) ? { ok: true, status: 200, message: 'Retired. No more warnings for it.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
       }
       return (await closeNotNeeded(ref)) ? { ok: true, status: 200, message: 'Closed. No follow-up needed.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
     case 'nudge': {

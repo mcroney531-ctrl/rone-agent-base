@@ -48,6 +48,7 @@ psql "$DB_URL" -q -f sql/014_push_ingress.sql
 psql "$DB_URL" -q -f sql/015_feed_watch.sql
 psql "$DB_URL" -q -f sql/016_credentials.sql
 psql "$DB_URL" -q -f sql/017_feed_old_items.sql
+psql "$DB_URL" -q -f sql/018_credential_managed_writes.sql
 psql "$DB_URL" -q -f sql/002_views.sql
 echo "migrations applied: $(psql_db 'select version from dbos.dbos_migrations')"
 echo "v_runs: $(psql_db "select string_agg(workflow_id || '=' || dbos_status, ', ' order by workflow_id) from ops.v_runs")"

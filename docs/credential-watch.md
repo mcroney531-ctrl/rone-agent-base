@@ -95,8 +95,41 @@ Active probing, rotation, a dependency graph, or any new workflow. The rotation 
 Claude maintains the inventory as its own identity, not as the owner.
 
 - **Token delivery.** `CREDENTIALS_AGENT_TOKEN` is set on the worker. The same value is stored as a *network secret* on the Claude Code cloud environment, scoped to the worker host and the `/credentials` path. The environment's proxy attaches it outside Claude's sandbox, so Claude never holds the value and cannot present any other identity on those routes.
-- **Default deny.** `AGENT_ALLOWED` in `src/auth.ts` lists the exact routes the identity may call. Every other route, including routes added later, returns 403 before any handler runs. Step 1 allows only `GET /credentials/whoami`.
+- **Default deny.** `AGENT_ALLOWED` in `src/auth.ts` lists the exact routes the identity may call: whoami, list/read, create, update, read events, add consumer, add check. Every other route returns 403 before any handler runs, including retire, consumer removal, every Needs You action and routes added later.
 - **Never forwarded.** The agent token is matched before the Supabase session check, so a live agent token is never sent to Supabase Auth.
 - **Fails closed.** A token shorter than 32 characters is ignored, so the identity does not exist.
 - **Revocation.** Remove or change the Railway variable. The old token then returns 401 on the next deploy. A revoked token is treated like any unknown bearer token: it is checked against Supabase Auth, which rejects it.
 - **Tests.** `scripts/test-agent-identity.ts` covers whoami, near-miss tokens, the 403s with no side effects, the Supabase leak, unset/short/rotated tokens. A mutation that removes the gate is caught.
+
+## Managed writes
+
+Every credential mutation by any caller runs in one transaction. The same transaction writes its `ops.credential_events` row (actor, op, evidence level and note, idempotency key, before/after snapshot). If the audit row fails, the change rolls back.
+
+**Identity and retries**
+- **Credentials:** identity is the id, never the name. Two credentials with the same name stay two. The agent creating one at a provider + secret location already tracked gets a 409 with `existingId`: it should update that credential instead.
+- **Consumers:** identity is (credential, consumer), compared case- and space-insensitively (unique index). Re-observing a consumer updates that row and never adds a second one.
+- **Checks:** each check is an observation. A new Idempotency-Key is a new row; a retry under the same key returns the first row.
+- **Idempotency-Key** (header, required for the agent): the first response for (actor, key) is stored in `ops.credential_requests` within the same transaction. A retry with the same request replays it with `replayed: true`. The same key on a different request gets a 409. A failed request stores nothing, so its key can be retried.
+
+**Stale writes.** Each credential has a `version`, which every mutation of it moves on, including changes to its consumers and checks. Agent updates and consumer writes must send `ifVersion`. If it doesn't match, the agent gets a 409 with `currentVersion`. That is how a sweep is kept from overwriting a newer owner correction. The owner's app doesn't send `ifVersion`, so its writes always apply.
+
+**Evidence levels.** `field_provenance` records the level, actor and time for each field:
+- `provider_verified`: seen at the provider or host. Claude states this; it is not independently proven.
+- `owner_confirmed`: the owner wrote it.
+- `inferred`.
+
+The agent sends `evidence: {level: provider_verified | inferred, note}`. It can never claim `owner_confirmed`. Rules for the agent:
+- It may not overwrite a field backed by a stronger level. `owner_confirmed` is the strongest, so the agent never overwrites an owner-set field. Values entered before managed writes have no provenance and count as owner-set. Empty fields can be filled.
+- Sending the same value with a stronger level upgrades the provenance. Sending the same value at an equal or weaker level is a no-op: no event and no version change.
+- It may not remove a deadline (`null`, `"none"` or `""`).
+- Extending a deadline needs `provider_verified`. Moving one earlier on `inferred` evidence is allowed, because it only warns sooner.
+- Confirming a consumer needs `provider_verified`. It never downgrades or removes one.
+- Unknown body fields are a 400. This blocks indirect retire or ownership changes through a PATCH, such as `removed_at`, `managed_by` or `status`.
+
+Retire and consumer removal are owner-only. They are blocked by the allowlist, and `src/credentials.ts` refuses them for the agent as well.
+
+**Secrets.** Evidence notes go through the same `ops.looks_like_secret` check as other free text. Snapshots contain only tracked columns, and their `secret_ref` must pass the frozen `ops.secret_ref_ok_v1` (DB CHECK `credential_events_secret_ref_v1`).
+
+**Tests.** `scripts/test-credentials-managed.ts` covers concurrent creates under one key, concurrent updates from one version, stale sweep vs owner correction, injected audit failure (full rollback, key not burned), evidence downgrade, indirect retire/deadline removal, consumer and check identity, secret refusal, the audit trail and revocation. These mutations are each caught: no version check, deadline removal allowed, no evidence ranking, swallowed audit errors, the extension rule removed.
+
+**Where it runs.** Live agent writes come from claude.ai/code sessions in the dedicated cloud environment that holds the network secret. Project chats don't receive network secrets (Agent Hub: `credential-watch/token-delivery-2026-11-27.md`).

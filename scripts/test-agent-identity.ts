@@ -58,15 +58,17 @@ try {
   const seeded = await one(db, `insert into ops.connections (id, provider, status, managed_by, kind, display_name, expires_at)
     values ('cred:seed', 'manual', 'active', 'manual', 'api_key', 'Seed key', now() + interval '60 days') returning id`);
   const id = enc(seeded.id);
+  // Allowed credential routes are exercised in scripts/test-credentials-managed.ts. Everything else is refused here.
   const denied: [string, string, unknown?][] = [
-    ['GET', '/credentials'],
-    ['POST', '/credentials', { display_name: 'Sneaky', kind: 'api_key', expires_at: '2030-01-01' }],
-    ['GET', `/credentials/${id}`],
-    ['PATCH', `/credentials/${id}`, { expires_at: null }],
-    ['PATCH', `/credentials/${id}`, { notes: 'x', removed_at: '2026-01-01T00:00:00Z' }],
     ['DELETE', `/credentials/${id}`],
-    ['POST', `/credentials/${id}/consumers`, { consumer: 'x', confidence: 'confirmed' }],
-    ['POST', `/credentials/${id}/checks`, { scope: 'x', result: 'y' }],
+    ['DELETE', `/credentials/${id}/consumers/1`],
+    ['PUT', `/credentials/${id}`, { notes: 'x' }],
+    ['POST', `/credentials/${id}`, { notes: 'x' }],
+    ['PATCH', '/credentials', { notes: 'x' }],
+    ['GET', `/credentials/${id}/consumers`],
+    ['POST', `/credentials/${id}/events`, {}],
+    ['GET', `/credentials/${id}/checks/extra`],
+    ['GET', '/credentials/events'],
     ['GET', '/attention'],
     ['POST', `/attention/credential_expiry/${id}/not_needed`, {}],
     ['GET', '/health'],

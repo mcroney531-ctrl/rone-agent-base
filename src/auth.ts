@@ -39,13 +39,27 @@ function bearerIs(header: string, token: string | undefined): boolean {
 const isApiToken = (header: string) => bearerIs(header, API_TOKEN);
 
 // The agent identity's explicit allowlist. Anything not listed is refused, including routes added later.
-// Keys are `METHOD path-pattern`, with :id standing for one path segment.
-const AGENT_ALLOWED = new Set<string>([
-  'GET credentials/whoami',
-]);
+// Each entry is a method and an exact path shape; ':id' matches one segment that is not a reserved word.
+const AGENT_ALLOWED: [string, string][] = [
+  ['GET', 'credentials/whoami'],
+  ['GET', 'credentials'],
+  ['POST', 'credentials'],
+  ['GET', 'credentials/:id'],
+  ['PATCH', 'credentials/:id'],
+  ['GET', 'credentials/:id/events'],
+  ['POST', 'credentials/:id/consumers'],
+  ['POST', 'credentials/:id/checks'],
+  // Deliberately absent: DELETE credentials/:id (retire), DELETE credentials/:id/consumers/:id, every
+  // other route (Needs You actions, agents, devices, connections...). src/credentials.ts refuses retire and
+  // consumer removal for the agent as well.
+];
+const RESERVED = new Set(['whoami', 'events', 'consumers', 'checks']);
 export function agentAllowed(method: string | undefined, parts: string[]): boolean {
-  const shape = parts.map((p, i) => (i > 0 && parts[0] === 'credentials' && p !== 'whoami' ? ':id' : p)).join('/');
-  return AGENT_ALLOWED.has(`${method ?? ''} ${shape}`);
+  return AGENT_ALLOWED.some(([m, shape]) => {
+    if (m !== method) return false;
+    const want = shape.split('/');
+    return want.length === parts.length && want.every((w, i) => (w === ':id' ? parts[i] !== '' && !RESERVED.has(parts[i]!) : w === parts[i]));
+  });
 }
 
 // Short cache so a screen that makes five calls costs one Supabase round trip. Sessions revoked in
