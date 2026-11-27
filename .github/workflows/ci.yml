@@ -99,6 +99,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-mobile.ts
 
+      - name: Scoped agent identity (claude-credentials, default-deny)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-agent-identity.ts
+
       - name: Push notifications (fake push service, real encryption)
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
