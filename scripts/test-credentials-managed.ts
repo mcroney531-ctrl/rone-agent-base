@@ -1,5 +1,6 @@
 // Managed inventory writes: the agent identity's write rules, atomic audit, idempotency, stale-write protection.
 // Usage (externals running, Postgres at PG_ADMIN_URL): npx tsx scripts/test-credentials-managed.ts
+import fs from 'node:fs';
 import { EXTERNALS, all, freshDb, killAllWorkers, one, startWorker } from './lib.js';
 
 const PORT = 7870;
@@ -77,6 +78,30 @@ try {
     && evCreate[0].idempotency_key === K1 && evCreate[0].before === null && evCreate[0].after.secret_ref === body.secretRef, evCreate);
   check('created fields carry inferred provenance', prov.date?.level === 'inferred' && prov.name?.level === 'inferred' && prov.secretRef?.level === 'inferred', prov);
 
+  // Review finding 4: one credential per location, even under concurrency or via a later PATCH.
+  const sameLoc = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+    agent('POST', '/credentials', { name: `Loc racer ${i}`, provider: 'stripe', secretRef: 'railway:shop/STRIPE_KEY', evidence: inferred() })));
+  const locRows = await one(db, `select count(*)::int n from ops.connections where secret_ref = 'railway:shop/STRIPE_KEY'`);
+  check('6 concurrent agent creates at one location (different keys) → exactly one credential',
+    locRows.n === 1 && sameLoc.filter((r) => r.status === 201).length === 1 && sameLoc.filter((r) => r.status === 409).length === 5, sameLoc.map((r) => r.status));
+  const noLoc = await agent('POST', '/credentials', { name: 'Loc later', provider: 'stripe', evidence: inferred() });
+  const moveIn = await agent('PATCH', `/credentials/${enc(noLoc.body.id)}`, { secretRef: 'RAILWAY:shop/stripe_key', ifVersion: 1, evidence: inferred() });
+  check('PATCHing secretRef to an already-tracked location → 409 with existingId', moveIn.status === 409 && !!moveIn.body.existingId, moveIn);
+
+  // Review finding 6: the Idempotency-Key is stored and shown, so it must be a plain token.
+  const secretKey = await agent('POST', '/credentials', { name: 'K', provider: 'x', evidence: inferred() }, 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789');
+  const oddKey = await agent('POST', '/credentials', { name: 'K', provider: 'x', evidence: inferred() }, 'clé-ünïcødé-key');
+  check('secret-shaped or non-token Idempotency-Key → 400, nothing stored', secretKey.status === 400 && oddKey.status === 400
+    && (await one(db, `select count(*)::int n from ops.credential_requests where key like 'sk-ant%'`)).n === 0, [secretKey, oddKey]);
+
+  // Review finding 5: integration rows are read-only for the agent, annotations included.
+  const gv = (await one(db, `select version::int v from ops.connections where id = 'google:primary'`)).v;
+  const gConsumer = await agent('POST', '/credentials/google%3Aprimary/consumers', { consumer: 'x', ifVersion: gv, evidence: inferred() });
+  const gCheck = await agent('POST', '/credentials/google%3Aprimary/checks', { scope: 's', result: 'r', evidence: inferred() });
+  const gPatch = await agent('PATCH', '/credentials/google%3Aprimary', { notes: 'n', ifVersion: gv, evidence: inferred() });
+  check('agent cannot annotate or edit integration rows (409 each, version unchanged)', [gConsumer, gCheck, gPatch].every((r) => r.status === 409)
+    && (await one(db, `select version::int v from ops.connections where id = 'google:primary'`)).v === gv, [gConsumer.status, gCheck.status, gPatch.status]);
+
   // ================= update: version, indirect retire / deadline removal =================
   const v1 = (await row(id)).version;
   const p = `/credentials/${enc(id)}`;
@@ -134,16 +159,39 @@ try {
   check('owner edit is recorded as owner_confirmed; the agent cannot overwrite it even with provider_verified (409)',
     ownerFix.status === 200 && ownerFix.body.provenance?.notes?.level === 'owner_confirmed' && overOwner.status === 409 && overOwner.body.currentLevel === 'owner_confirmed', [ownerFix.body.provenance, overOwner]);
 
-  // Pre-existing (pre-018) rows: values have no provenance and count as owner-entered; empty fields are fair game.
+  // Pre-existing (pre-018) rows: migration 018 stamps every field, set or empty, as the owner's.
   await db.query(`insert into ops.connections (id, provider, status, managed_by, kind, display_name, notes, expires_at)
                   values ('cred:legacy', 'supabase', 'active', 'manual', 'api_key', 'Legacy key', 'entered by hand', now() + interval '40 days')`);
+  await db.query(fs.readFileSync('sql/018_credential_managed_writes.sql', 'utf8')); // what the next boot does
   const lp = '/credentials/cred%3Alegacy';
   const lv = (await row('cred:legacy')).version;
   const legacyDate = await agent('PATCH', lp, { date: '2030-01-01', ifVersion: lv, evidence: verified() });
   const legacyNotes = await agent('PATCH', lp, { notes: 'changed', ifVersion: lv, evidence: verified() });
   const legacyFill = await agent('PATCH', lp, { renewUrl: 'https://supabase.com/dashboard', ifVersion: lv, evidence: inferred() });
-  check('legacy values count as owner-set (agent refused); an empty field can be filled',
-    legacyDate.status === 409 && legacyNotes.status === 409 && legacyFill.status === 200 && legacyFill.body.renew_url === 'https://supabase.com/dashboard', [legacyDate.status, legacyNotes.status, legacyFill]);
+  check('legacy rows: every field, set or empty, is the owner\'s (agent refused, even filling a blank)',
+    legacyDate.status === 409 && legacyNotes.status === 409 && legacyFill.status === 409, [legacyDate.status, legacyNotes.status, legacyFill]);
+  const reMigrate = (await row('cred:legacy')).field_provenance;
+  await db.query(fs.readFileSync('sql/018_credential_managed_writes.sql', 'utf8'));
+  check('re-running 018 leaves existing provenance alone', JSON.stringify((await row('cred:legacy')).field_provenance) === JSON.stringify(reMigrate));
+
+  // Review finding 2: an explicit "no date" is the owner's decision; the agent can't add one.
+  const undated = await owner('POST', '/credentials', { name: 'Never expires', provider: 'github', kind: 'pat', date: null });
+  const up = `/credentials/${enc(undated.body.id)}`;
+  const addDate = await agent('PATCH', up, { date: '2026-12-01', ifVersion: 1, evidence: inferred() });
+  check('owner created with no date → agent may not add one (409)', undated.status === 201 && addDate.status === 409 && addDate.body.currentLevel === 'owner_confirmed', addDate);
+  await db.query(`insert into ops.connections (id, provider, status, managed_by, kind, display_name, field_provenance)
+                  values ('cred:fresh-blank', 'x', 'active', 'manual', 'api_key', 'Blank', '{"name":{"level":"inferred"}}')`);
+  const restate = await owner('PATCH', '/credentials/cred%3Afresh-blank', { date: null });
+  const afterRestate = await agent('PATCH', '/credentials/cred%3Afresh-blank', { date: '2026-12-01', ifVersion: restate.body.version, evidence: inferred() });
+  check('owner "Doesn\'t expire" on an undated row records the decision; the agent then cannot add a date',
+    restate.status === 200 && restate.body.changed === true && restate.body.provenance?.date?.level === 'owner_confirmed' && afterRestate.status === 409, [restate.body, afterRestate.status]);
+
+  // Review finding 8: what the date means is as strong as the date.
+  const agentMade = await agent('POST', '/credentials', { name: 'Relabel target', provider: 'openai', date: '2027-03-01', evidence: inferred() });
+  const rp = `/credentials/${enc(agentMade.body.id)}`;
+  await owner('PATCH', rp, { date: '2027-01-20' }); // the owner corrects the date; dateKind is still the agent's
+  const relabel = await agent('PATCH', rp, { dateKind: 'review_by', ifVersion: (await row(agentMade.body.id)).version, evidence: verified() });
+  check('agent may not relabel an owner-confirmed date (dateKind follows the date\'s evidence)', relabel.status === 409, relabel);
 
   // ================= stale updates and concurrency =================
   // The sweep reads, the owner corrects, the sweep writes what it read before: refused.
@@ -180,6 +228,34 @@ try {
     [confirmInferred.status, confirmVerified.status, downgrade.status, agentRemove.status]);
   const ownerDown = await owner('POST', cp, { consumer: 'Railway worker', confidence: 'candidate', evidence: 'Not sure anymore' });
   check('the owner can downgrade', ownerDown.status === 200 && ownerDown.body.changed === true, ownerDown);
+
+  // Review finding 3: the owner's word on a consumer stands.
+  cv = (await row(id)).version;
+  const reconfirm = await agent('POST', cp, { consumer: 'Railway worker', confidence: 'confirmed', ifVersion: cv, evidence: verified() });
+  await owner('POST', cp, { consumer: 'Cron job', confidence: 'candidate', evidence: 'Owner thinks the cron uses it' });
+  cv = (await row(id)).version;
+  const overwriteOwnerEvidence = await agent('POST', cp, { consumer: 'cron job', confidence: 'confirmed', ifVersion: cv, evidence: verified('Railway shows it') });
+  const cronRow = await one(db, `select confidence, evidence, noted_by from ops.credential_consumers where connection_id = $1 and consumer = 'Cron job'`, [id]);
+  check('the agent never re-confirms an owner-downgraded consumer or overwrites an owner-noted one (409, row untouched)',
+    reconfirm.status === 409 && overwriteOwnerEvidence.status === 409 && cronRow.evidence === 'Owner thinks the cron uses it' && cronRow.noted_by.startsWith('owner:'), [reconfirm.status, overwriteOwnerEvidence.status, cronRow]);
+  // Review finding 7: the owner re-adding with new evidence is an edit, not a silent no-op.
+  const ownerReAdd = await owner('POST', cp, { consumer: 'Cron job', confidence: 'candidate', evidence: 'Checked: nightly backup cron' });
+  check('owner re-add with new evidence updates it', ownerReAdd.status === 200 && ownerReAdd.body.changed === true
+    && (await one(db, `select evidence from ops.credential_consumers where connection_id = $1 and consumer = 'Cron job'`, [id])).evidence === 'Checked: nightly backup cron', ownerReAdd);
+
+  // Review finding 1: owner removing a consumer while the sweep confirms it must not deadlock.
+  let fives = 0;
+  for (let i = 0; i < 40; i++) {
+    const name = `Race consumer ${i}`;
+    const v0 = (await row(id)).version;
+    const added = await agent('POST', cp, { consumer: name, confidence: 'candidate', ifVersion: v0, evidence: inferred() });
+    const results = await Promise.all([
+      owner('DELETE', `${cp}/${added.body.id}`),
+      agent('POST', cp, { consumer: name, confidence: 'confirmed', ifVersion: added.body.version, evidence: verified() }),
+    ]);
+    fives += results.filter((r) => r.status >= 500).length;
+  }
+  check('40 races of owner remove vs agent confirm: no 500s (one lock order)', fives === 0, fives);
 
   // ================= checks: retry vs fresh observation =================
   const kp = `${p}/checks`;

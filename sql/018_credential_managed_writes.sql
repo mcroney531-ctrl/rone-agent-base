@@ -48,3 +48,17 @@ create table if not exists ops.credential_requests (
 -- A re-observation updates that row; it never adds a second.
 create unique index if not exists credential_consumers_identity
   on ops.credential_consumers (connection_id, lower(btrim(consumer)));
+
+-- Consumers carry the evidence level of whoever last set them. Rows from before managed writes were entered
+-- by the owner. The agent never changes an owner_confirmed consumer.
+alter table ops.credential_consumers add column if not exists evidence_level text
+  check (evidence_level in ('provider_verified', 'owner_confirmed', 'inferred'));
+update ops.credential_consumers set evidence_level = 'owner_confirmed' where evidence_level is null;
+
+-- Manual credentials from before managed writes: every field, set or empty, was the owner's decision.
+-- Stamped once (only rows with no provenance yet), so the agent can't fill an owner's deliberate blank.
+update ops.connections c
+   set field_provenance = (
+     select jsonb_object_agg(f, jsonb_build_object('level', 'owner_confirmed', 'by', 'pre-managed-writes', 'at', now()))
+       from unnest(array['name', 'provider', 'kind', 'date', 'dateKind', 'secretRef', 'renewUrl', 'notes']) as f)
+ where c.managed_by = 'manual' and c.kind is not null and c.field_provenance = '{}'::jsonb;

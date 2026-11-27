@@ -181,9 +181,11 @@ function stableJson(v: unknown): string {
  */
 async function managed(ctx: WriteCtx, op: string, request: unknown, run: (c: pg.PoolClient) => Promise<Result>): Promise<Result> {
   if (ctx.actor.agent && !ctx.key) throw new CredentialError('Idempotency-Key header is required.');
-  if (ctx.key !== undefined && (ctx.key.length < 8 || ctx.key.length > 200)) throw new CredentialError('Idempotency-Key must be 8–200 characters.');
+  // A plain token (it is stored and shown in the audit trail): 8-200 of [A-Za-z0-9._:-], and not secret-shaped.
+  if (ctx.key !== undefined && !/^[A-Za-z0-9._:-]{8,200}$/.test(ctx.key)) throw new CredentialError('Idempotency-Key must be 8-200 characters of A-Z a-z 0-9 . _ : -');
   const hash = createHash('sha256').update(`${op}\n${stableJson(request)}`).digest('hex');
   return withTx(async (c) => {
+    if (ctx.key) await assertNoSecrets(c, { 'Idempotency-Key': ctx.key });
     if (ctx.key) {
       // Same-key requests run one at a time, so a concurrent retry waits and then replays.
       await c.query(`select pg_advisory_xact_lock(hashtext('credreq:' || $1 || ':' || $2))`, [ctx.actor.label, ctx.key]);
@@ -224,11 +226,12 @@ async function touch(c: pg.PoolClient, id: string): Promise<number> {
 type Locked = { managed_by: string; removed_at: Date | null; version: string; expires_at: Date | null; field_provenance: Record<string, { level: Level }>; [col: string]: unknown };
 
 /** Lock a tracked credential and check the caller saw its current version. */
-async function lockTracked(c: pg.PoolClient, id: string, ifVersion: number | null): Promise<Locked> {
+async function lockTracked(c: pg.PoolClient, id: string, ifVersion: number | null, agentWrite = false): Promise<Locked> {
   const { rows: [r] } = await c.query(
-    `select managed_by, removed_at, version, expires_at, field_provenance, display_name, kind, date_kind, secret_ref, renew_url, notes
+    `select managed_by, removed_at, version, expires_at, field_provenance, provider, display_name, kind, date_kind, secret_ref, renew_url, notes
        from ops.connections where id = $1 and kind is not null for update`, [id]);
   if (!r || r.removed_at) throw new NotFound('no such credential');
+  if (agentWrite && r.managed_by !== 'manual') throw conflict('managed by its integration; the agent does not annotate it');
   if (ifVersion !== null && Number(r.version) !== ifVersion) {
     throw conflict('This credential changed since you read it. Read it again and re-apply.', { currentVersion: Number(r.version) });
   }
@@ -246,6 +249,18 @@ function fieldLevel(r: Locked, field: string, current: unknown): Level | null {
 
 const sameValue = (a: unknown, b: unknown) =>
   a instanceof Date || b instanceof Date ? (a == null ? null : new Date(a as Date).getTime()) === (b == null ? null : new Date(b as Date).getTime()) : (a ?? null) === (b ?? null);
+
+/**
+ * For the agent: one tracked credential per (provider, secret location). Serialized per location, so
+ * concurrent creates (or a create racing a PATCH of secretRef) can't both pass the check.
+ */
+async function assertLocationFree(c: pg.PoolClient, provider: string, secretRef: string, self: string | null) {
+  await c.query(`select pg_advisory_xact_lock(hashtext('credloc:' || $1 || ':' || lower($2)))`, [provider, secretRef]);
+  const { rows: [dup] } = await c.query(
+    `select id from ops.connections where provider = $1 and lower(secret_ref) = lower($2) and kind is not null and removed_at is null
+        and id is distinct from $3 limit 1`, [provider, secretRef, self]);
+  if (dup) throw conflict('A tracked credential already lives there. Update it instead.', { existingId: dup.id });
+}
 
 const UPDATE_FIELDS = ['name', 'kind', 'date', 'dateKind', 'secretRef', 'renewUrl', 'notes'] as const;
 const COLUMN: Record<(typeof UPDATE_FIELDS)[number], string> = {
@@ -269,11 +284,7 @@ export async function createCredential(input: CredentialInput & { evidence?: unk
     const date = await parseDate(c, input.date);
     // Identity is never the name. For the agent, the same secret location at the same provider is the same
     // credential: it gets a 409 naming the existing one (update that), never a silent merge or a duplicate.
-    if (ctx.actor.agent && secretRef) {
-      const { rows: [dup] } = await c.query(
-        `select id from ops.connections where provider = $1 and lower(secret_ref) = lower($2) and kind is not null and removed_at is null limit 1`, [provider, secretRef]);
-      if (dup) throw conflict('A tracked credential already lives there. Update it instead.', { existingId: dup.id });
-    }
+    if (ctx.actor.agent && secretRef) await assertLocationFree(c, provider, secretRef, null);
     // Ids are never reused, not even a removed credential's: its consumers and checks stay with it.
     const base = `cred:${slug(name)}`;
     // Serialize creates that share a base id: without this, concurrent same-name creates collide (review D5).
@@ -284,7 +295,10 @@ export async function createCredential(input: CredentialInput & { evidence?: unk
     for (let i = 2; used.has(id); i++) id = `${base}-${i}`;
     const stamp = { level: ev.level, by: ctx.actor.label, at: new Date().toISOString() };
     const given: Record<string, unknown> = { name, provider, kind, dateKind, secretRef, renewUrl, notes, date };
-    const prov = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== null && v !== undefined).map(([k]) => [k, stamp]));
+    // Stamp what the caller decided, null included: an explicit "no date" or "no notes" is a decision too.
+    // The owner decides every field (the app's defaults included); the agent only the fields it sent.
+    const sent = (k: string) => k === 'name' || k === 'provider' || Object.prototype.hasOwnProperty.call(input, k);
+    const prov = Object.fromEntries(Object.keys(given).filter((k) => !ctx.actor.agent || sent(k)).map((k) => [k, stamp]));
     await c.query(
       `insert into ops.connections (id, provider, status, display_name, kind, managed_by, secret_ref, date_kind, renew_url, notes, last_checked_at, field_provenance)
        values ($1, $2, 'active', $3, $4, 'manual', $5, $6, $7, $8, null, $9)`,
@@ -319,9 +333,16 @@ export async function updateCredential(id: string, patch: CredentialInput & { if
     const stamped: string[] = [];
     for (const [field, value] of Object.entries(next)) {
       const current = r[COLUMN[field as keyof typeof COLUMN]];
-      const have = fieldLevel(r, field, current);
+      let have = fieldLevel(r, field, current);
+      // What the date means (expires / provider target / review by) is as strong as the date it labels.
+      if (field === 'dateKind') {
+        const d = fieldLevel(r, 'date', r.expires_at);
+        if (d && (!have || RANK[d] > RANK[have])) have = d;
+      }
       const same = sameValue(current, value);
-      if (same && (!have || RANK[ev.level] <= RANK[have])) continue; // nothing new
+      // Nothing new: the same value without stronger evidence. Exception: the owner restating a value that has
+      // no provenance yet (e.g. "Doesn't expire" on an undated row) records that it is the owner's decision.
+      if (same && (have ? RANK[ev.level] <= RANK[have] : ctx.actor.agent)) continue;
       if (ctx.actor.agent) {
         if (have && RANK[have] > RANK[ev.level]) {
           throw conflict(have === 'owner_confirmed'
@@ -335,6 +356,7 @@ export async function updateCredential(id: string, patch: CredentialInput & { if
           }
         }
       }
+      if (field === 'secretRef' && ctx.actor.agent && !same && value) await assertLocationFree(c, String(r.provider), String(value), id);
       if (!same) changes[field] = value;
       stamped.push(field);
     }
@@ -398,7 +420,8 @@ export async function retireCredential(id: string, actor: Actor): Promise<boolea
   });
 }
 
-const CONSUMER_SNAP = `jsonb_build_object('id', id::text, 'consumer', consumer, 'confidence', confidence, 'evidence', evidence, 'agent_id', agent_id, 'noted_by', noted_by)`;
+const CONSUMER_SNAP = `jsonb_build_object('id', id::text, 'consumer', consumer, 'confidence', confidence, 'evidence', evidence, 'agent_id', agent_id,
+  'noted_by', noted_by, 'evidence_level', evidence_level)`;
 
 /**
  * Record a consumer. Identity is (credential, consumer name, case- and space-insensitive): observing it again
@@ -417,24 +440,32 @@ export async function addConsumer(id: string, b: { consumer?: unknown; confidenc
   const ifVersion = versionFor(ctx, agent);
   if (agent && confidence === 'confirmed' && ev.level !== 'provider_verified') throw new CredentialError('Confirming a consumer needs provider_verified evidence.');
   return managed(ctx, `consumer:${id}`, { consumer, confidence, evidence, agentId, ifVersion, level: ev.level }, async (c) => {
-    await lockTracked(c, id, ifVersion);
+    await lockTracked(c, id, ifVersion, agent);
     await assertNoSecrets(c, { consumer, evidence });
     if (agentId && !(await c.query(`select 1 from ops.agents where id = $1`, [agentId])).rows.length) throw new CredentialError('No such agent.');
     const { rows: [old] } = await c.query(
-      `select id, confidence, ${CONSUMER_SNAP} as s from ops.credential_consumers where connection_id = $1 and lower(btrim(consumer)) = lower(btrim($2)) for update`, [id, consumer]);
+      `select id, confidence, evidence, evidence_level, ${CONSUMER_SNAP} as s from ops.credential_consumers
+        where connection_id = $1 and lower(btrim(consumer)) = lower(btrim($2)) for update`, [id, consumer]);
     if (old) {
-      if (old.confidence === confidence) return { status: 200, body: { id: String(old.id), changed: false } };
-      if (agent && old.confidence === 'confirmed') throw conflict('This consumer is confirmed; only the owner downgrades it.', { consumerId: String(old.id) });
+      // The owner's word on a consumer stands: the agent never changes a row the owner noted (or a legacy one).
+      if (agent && (old.evidence_level ?? 'owner_confirmed') === 'owner_confirmed') {
+        if (old.confidence === confidence) return { status: 200, body: { id: String(old.id), changed: false } };
+        throw conflict('The owner recorded this consumer; only the owner changes it.', { consumerId: String(old.id) });
+      }
+      if (agent && old.confidence === 'confirmed' && confidence === 'candidate') throw conflict('This consumer is confirmed; only the owner downgrades it.', { consumerId: String(old.id) });
+      // Same confidence: nothing new for the agent; for the owner, new evidence text is an edit.
+      if (old.confidence === confidence && (agent || old.evidence === evidence)) return { status: 200, body: { id: String(old.id), changed: false } };
       const { rows: [n] } = await c.query(
-        `update ops.credential_consumers set confidence = $2, evidence = $3, noted_at = now(), noted_by = $4 where id = $1 returning ${CONSUMER_SNAP} as s`,
-        [old.id, confidence, evidence, ctx.actor.label]);
+        `update ops.credential_consumers set confidence = $2, evidence = $3, evidence_level = $4, noted_at = now(), noted_by = $5 where id = $1 returning ${CONSUMER_SNAP} as s`,
+        [old.id, confidence, evidence, ev.level, ctx.actor.label]);
       const version = await touch(c, id);
       await audit(c, ctx, ev, id, 'consumer_update', old.s, n.s);
       return { status: 200, body: { id: String(old.id), changed: true, version } };
     }
     const { rows: [r] } = await c.query(
-      `insert into ops.credential_consumers (connection_id, consumer, confidence, evidence, agent_id, noted_by) values ($1, $2, $3, $4, $5, $6) returning id, ${CONSUMER_SNAP} as s`,
-      [id, consumer, confidence, evidence, agentId, ctx.actor.label]);
+      `insert into ops.credential_consumers (connection_id, consumer, confidence, evidence, agent_id, noted_by, evidence_level)
+       values ($1, $2, $3, $4, $5, $6, $7) returning id, ${CONSUMER_SNAP} as s`,
+      [id, consumer, confidence, evidence, agentId, ctx.actor.label, ev.level]);
     const version = await touch(c, id);
     await audit(c, ctx, ev, id, 'consumer_add', null, r.s);
     return { status: 201, body: { id: String(r.id), changed: true, version } };
@@ -446,6 +477,9 @@ export async function removeConsumer(id: string, consumerId: string, actor: Acto
   if (!/^\d{1,18}$/.test(consumerId)) return false;
   const ctx: WriteCtx = { actor };
   return withTx(async (c) => {
+    // Credential row first, then the consumer: the same lock order as addConsumer (review: deadlock).
+    const { rows: [cred] } = await c.query(`select 1 from ops.connections where id = $1 and kind is not null for update`, [id]);
+    if (!cred) return false;
     const { rows: [r] } = await c.query(`delete from ops.credential_consumers where id = $2 and connection_id = $1 returning ${CONSUMER_SNAP} as s`, [id, consumerId]);
     if (!r) return false;
     await touch(c, id);
@@ -464,13 +498,13 @@ export async function addCheck(id: string, b: { scope?: unknown; result?: unknow
   const scope = text(b.scope, 'What was checked', 300, true)!;
   const result = text(b.result, 'Result', 500, true)!;
   return managed(ctx, `check:${id}`, { scope, result, level: ev.level, note: ev.note }, async (c) => {
-    await lockTracked(c, id, null);
+    const locked = await lockTracked(c, id, null, ctx.actor.agent);
     await assertNoSecrets(c, { scope, result, evidence: ev.note });
     const { rows: [r] } = await c.query(
       `insert into ops.credential_checks (connection_id, scope, result, noted_by) values ($1, $2, $3, $4) returning id`, [id, scope, result, ctx.actor.label]);
-    const version = await touch(c, id);
+    // A check overwrites nothing, so it doesn't move the version: a sweep can record checks, then PATCH.
     await audit(c, ctx, ev, id, 'check_add', null, { id: String(r.id), scope, result });
-    return { status: 201, body: { id: String(r.id), version } };
+    return { status: 201, body: { id: String(r.id), version: Number(locked.version) } };
   });
 }
 
