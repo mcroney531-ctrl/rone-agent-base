@@ -241,12 +241,17 @@ function codeScreen(address) {
   code.focus();
 }
 
+// AI drafts leave [bracketed] fill-in slots for the owner (a fact only they know, or a choice).
+const PLACEHOLDER = /\[[^\]\n]{1,120}\]/;
 function actionButtons(item, after) {
   const send = async (a, btn, choice) => {
     btn.disabled = true;
     try {
       // Approve carries the payload version on screen: a proposal changed elsewhere is never approved blind.
       const version = a.id === 'approve' && item.edit ? { version: item.edit.version } : {};
+      // A [bracketed] placeholder left in the text is sent to Gmail as written: ask once, never strip it.
+      if (a.id === 'approve' && item.edit && item.edit.fields.some((f) => PLACEHOLDER.test(f.value))
+        && !confirm('This reply still has a [placeholder] in it. The draft will contain it exactly as written. Approve anyway?')) { btn.disabled = false; return; }
       const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid(), ...(choice ? { choice } : {}), ...version } });
       if (r.body.redirect) { location.href = r.body.redirect; return; }
       toast(r.body.message || (r.status < 300 ? 'Done' : 'Failed'));
@@ -277,17 +282,23 @@ function actionButtons(item, after) {
       el.addEventListener('click', (e) => e.stopPropagation());
       return { f, el };
     });
+    // Explain placeholders while they're there; the hint disappears once none are left.
+    const hint = h('div', { class: 'muted', style: 'margin:4px 0' }, 'Text in [brackets] is a placeholder: replace it with your answer, brackets included. Anything left in the box goes into the draft exactly as written.');
+    const syncHint = () => { hint.hidden = !inputs.some(({ el }) => PLACEHOLDER.test(el.value)); };
+    inputs.forEach(({ el }) => el.addEventListener('input', syncHint));
+    syncHint();
     const save = async (btn) => {
       btn.disabled = true;
       try {
         const r = await api(`/actions/${enc(ed.actionId)}`, { method: 'PATCH', body: { version: ed.version, fields: Object.fromEntries(inputs.map(({ f, el }) => [f.name, el.value])) } });
         if (r.status >= 300) { toast(r.body.error ?? 'Could not save'); if (r.body.reason === 'stale' || r.body.reason === 'decided') after(); else btn.disabled = false; return null; }
         ed.version = r.body.version; ed.edited = true;
+        for (const { f, el } of inputs) f.value = el.value; // the approve check sees what was just saved
         return r.body.version;
       } catch (err) { handleErr(err); return null; }
     };
     const box = h('div', { style: 'width:100%', onclick: (e) => e.stopPropagation() },
-      ...inputs.map(({ f, el }) => h('div', {}, h('div', { class: 'label' }, f.label), el)),
+      ...inputs.map(({ f, el }) => h('div', {}, h('div', { class: 'label' }, f.label), el)), hint,
       h('div', { class: 'actions' },
         h('button', { onclick: async (e) => { e.stopPropagation(); if (await save(e.currentTarget)) { toast('Saved'); after(); } } }, 'Save'),
         item.actions.some((a) => a.id === 'approve') ? h('button', { class: 'primary', onclick: async (e) => {
@@ -711,6 +722,7 @@ function handleErr(err) {
 
 async function route() {
   if (reloadPending) { location.reload(); return; } // they're done with the form (submitted or navigated)
+  if (Date.now() - lastBuildCheck > 60_000) checkBuild(); // navigating is a cheap moment to notice a new build
   if (!sb) return render(h('div', { class: 'empty' }, h('b', {}, 'Not configured'), 'Mobile sign-in is not set up on this server.'));
   if (!session) return loginScreen();
   document.getElementById('tabs').hidden = false;
@@ -743,6 +755,11 @@ document.addEventListener('visibilitychange', () => {
 });
 addEventListener('pageshow', (e) => { if (e.persisted) checkBuild(); }); // restored from the back/forward cache
 addEventListener('focus', () => { if (Date.now() - lastBuildCheck > 30_000) checkBuild(); }); // clicked back into the window
+// Android can resume a frozen app without a visibilitychange (Page Lifecycle "resume"), and a page left open never
+// leaves the tab: check on resume too, and every 2 minutes while visible. A new build reloads unless a form is
+// half-filled (then it waits for the next navigation). Bounded: one tiny /app/config fetch per check.
+document.addEventListener('resume', () => checkBuild());
+setInterval(() => { if (document.visibilityState === 'visible' && Date.now() - lastBuildCheck > 110_000) checkBuild(); }, 120_000);
 // The magic link lands with tokens in the URL fragment; supabase-js consumes them, then start on Needs You.
 if (/access_token|error_description/.test(location.hash)) history.replaceState(null, '', '/app/#/');
 route();
