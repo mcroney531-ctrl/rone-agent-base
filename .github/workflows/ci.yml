@@ -139,6 +139,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-provider-health.ts
 
+      - name: Edit before approve (versioned edits, exact payload executes, crash = one draft)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-action-edit.ts
+
       - name: Follow-up Tracker (fake Gmail) - durable items, reply-closes, snooze/not needed/nudge
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs

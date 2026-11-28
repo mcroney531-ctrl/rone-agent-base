@@ -55,6 +55,8 @@ export const AttentionItemSchema = z.object({
   severity: z.enum(['decision', 'problem', 'info']),
   createdAt: z.string(),
   actions: z.array(ItemAction),
+  edit: z.object({ actionId: z.string(), version: z.number(), edited: z.boolean(),
+    fields: z.array(z.object({ name: z.string(), label: z.string(), value: z.string(), multiline: z.boolean().optional(), maxLength: z.number().optional(), required: z.boolean().optional() })) }).optional(), // additive
 });
 
 export const AttentionDetailSchema = z.object({

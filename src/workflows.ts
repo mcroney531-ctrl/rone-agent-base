@@ -196,7 +196,11 @@ export async function insertAction(
     `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
      select $1, $2, $3, $4, $5, t.default_risk, $6 from ops.tools t where t.name = $3
      on conflict (idempotency_key) do update set
-       payload = case when $7 and ops.actions.status = 'pending_approval' then excluded.payload else ops.actions.payload end,
+       -- INVARIANT (edit before approve): once the owner has edited a proposal, no agent refresh or rerun replaces it
+       -- with a new AI proposal. Only the owner changes an edited payload (tested: test-action-edit).
+       payload = case when $7 and ops.actions.status = 'pending_approval' and ops.actions.edited_at is null then excluded.payload else ops.actions.payload end,
+       version = case when $7 and ops.actions.status = 'pending_approval' and ops.actions.edited_at is null and ops.actions.payload <> excluded.payload
+                      then ops.actions.version + 1 else ops.actions.version end,
        updated_at = case when $7 and ops.actions.status = 'pending_approval' then now() else ops.actions.updated_at end
      returning id, status, risk_level`,
     [agent.id, sourceWorkflowId, action, target, payload, idempotencyKey, Boolean(a.refreshPending)],
@@ -255,23 +259,87 @@ export function setExecutorEnqueuer(fn: typeof enqueueExecutor) {
   enqueueExecutor = fn;
 }
 
-export async function approveAndEnqueue(actionId: string, decidedBy: string): Promise<{ ok: boolean; status: string }> {
+/**
+ * Approve. `expectedVersion` is the version the owner was looking at: if the payload changed since (another
+ * device's edit, an agent refresh), nothing is approved and the caller gets 'stale' with the current version,
+ * so what executes is always exactly what the owner saw.
+ */
+export async function approveAndEnqueue(actionId: string, decidedBy: string, expectedVersion?: number): Promise<{ ok: boolean; status: string; version?: number }> {
   const c = await pool.connect();
   try {
     await c.query('begin');
     const { rows } = await c.query(
       `update ops.actions set status = 'approved', decided_by = $2, decided_at = now(), updated_at = now()
-        where id = $1 and status = 'pending_approval' returning idempotency_key`,
-      [actionId, decidedBy],
+        where id = $1 and status = 'pending_approval' and ($3::int is null or version = $3) returning idempotency_key`,
+      [actionId, decidedBy, expectedVersion ?? null],
     );
     if (!rows[0]) {
       await c.query('rollback');
-      const cur = await pool.query(`select status from ops.actions where id = $1`, [actionId]);
-      return { ok: false, status: cur.rows[0]?.status ?? 'not_found' };
+      const cur = await pool.query(`select status, version from ops.actions where id = $1`, [actionId]);
+      const st = cur.rows[0]?.status ?? 'not_found';
+      return { ok: false, status: st === 'pending_approval' ? 'stale' : st, version: cur.rows[0]?.version };
     }
     await enqueueExecutor!(c, actionId, rows[0].idempotency_key);
     await c.query('commit');
     return { ok: true, status: 'approved' };
+  } catch (e) {
+    await c.query('rollback').catch(() => undefined);
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
+export type EditableField = { name: string; label: string; multiline?: boolean; maxLength?: number; required?: boolean };
+export type EditResult =
+  | { ok: true; version: number; payload: Record<string, unknown> }
+  | { ok: false; status: 400 | 404 | 409; reason: 'not_found' | 'decided' | 'stale' | 'invalid'; message: string; version?: number };
+
+/**
+ * The owner edits a pending action's editable fields (per tool: ops.tools.editable_fields). Optimistic
+ * concurrency: `expectedVersion` must match, or nothing changes ('stale'). The AI's original is kept once in
+ * proposed_payload; every edit is logged in ops.action_edits. Approved/rejected actions are frozen.
+ */
+export async function editAction(actionId: string, fields: Record<string, unknown>, expectedVersion: number, by: string): Promise<EditResult> {
+  const c = await pool.connect();
+  try {
+    await c.query('begin');
+    const { rows: [a] } = await c.query(
+      `select a.status, a.version, a.payload, t.editable_fields from ops.actions a join ops.tools t on t.name = a.logical_action
+        where a.id::text = $1 for update of a`, [actionId]);
+    const fail = async (status: 400 | 404 | 409, reason: 'not_found' | 'decided' | 'stale' | 'invalid', message: string) => {
+      await c.query('rollback');
+      return { ok: false as const, status, reason, message, version: a?.version };
+    };
+    if (!a) return fail(404, 'not_found', 'No such action.');
+    if (a.status !== 'pending_approval') return fail(409, 'decided', `Already ${a.status}; it can't be edited.`);
+    if (a.version !== expectedVersion) return fail(409, 'stale', 'This changed since you opened it. Review the latest version.');
+    const allowed = new Map((a.editable_fields as EditableField[]).map((f) => [f.name, f]));
+    const names = Object.keys(fields);
+    if (!names.length) return fail(400, 'invalid', 'Nothing to change.');
+    const clean: Record<string, string> = {};
+    for (const n of names) {
+      const spec = allowed.get(n);
+      if (!spec) return fail(400, 'invalid', `"${n}" can't be edited here.`);
+      if (typeof fields[n] !== 'string') return fail(400, 'invalid', `${spec.label} must be text.`);
+      const v = (fields[n] as string).replace(/\r\n/g, '\n');
+      if (spec.required && !v.trim()) return fail(400, 'invalid', `${spec.label} can't be empty.`);
+      if (spec.maxLength && v.length > spec.maxLength) return fail(400, 'invalid', `${spec.label} is too long (max ${spec.maxLength}).`);
+      clean[n] = v;
+    }
+    const before = Object.fromEntries(names.map((n) => [n, (a.payload as Record<string, unknown>)[n] ?? null]));
+    if (names.every((n) => before[n] === clean[n])) {
+      await c.query('rollback');
+      return { ok: true, version: a.version, payload: a.payload };
+    }
+    const { rows: [u] } = await c.query(
+      `update ops.actions set proposed_payload = coalesce(proposed_payload, payload), payload = payload || $2::jsonb,
+              version = version + 1, edited_by = $3, edited_at = now(), updated_at = now()
+        where id::text = $1 returning version, payload`, [actionId, JSON.stringify(clean), by]);
+    await c.query(`insert into ops.action_edits (action_id, version, edited_by, before, after) values ($1::uuid, $2, $3, $4, $5)`,
+      [actionId, u.version, by, before, clean]);
+    await c.query('commit');
+    return { ok: true, version: u.version, payload: u.payload };
   } catch (e) {
     await c.query('rollback').catch(() => undefined);
     throw e;
