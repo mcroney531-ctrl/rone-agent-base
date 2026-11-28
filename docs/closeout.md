@@ -142,6 +142,17 @@ Found in production twice: on Nov 23 the Anthropic account ran out of credits fo
 - **Run history is untouched.** Credits failures get their own class (`provider_billing`). The failed runs stay in `ops.runs`/`ops.v_runs`, but their individual "Run failed" cards are folded into the provider item, matched by the outage window in `ops.provider_outages`.
 - **Tests:** `test-provider-health` in CI (14 checks). The scripted model can fail with Anthropic's exact credits response at runtime.
 
+### Model usage / spend log (V1: observation only)
+
+Recording, not enforcement: no caps, no alerts, no budget engine. The goal is a few weeks of real numbers before any budget or digest is designed.
+
+- **One row per real provider call** in `ops.model_calls`: provider, model (the model that served it), agent, run (DBOS workflow id), step, uncached input, output, cache-read and cache-write tokens, reasoning tokens when reported, estimated cost, timestamp.
+- **Written by model middleware inside the durable step** (`src/usageLog.ts`, next to `providerHealth`). A replayed checkpoint never reaches the provider, so it is never logged. A retried attempt the provider answered was paid for, so it is. A refused call (no answer) adds no row.
+- **Estimated cost** comes from `ops.model_prices` (USD per million tokens, Anthropic list prices seeded for Sonnet 5.5, Sonnet 5, Opus 5.5 and Haiku 5.5). A price change is a new row with a later `effective_from`: older calls keep the cost they were priced at. A model without a price row gets `NULL` cost and counts as "unpriced", never as $0. It is an estimate from token counts, not the Anthropic invoice.
+- **Totals are derived, never stored:** `ops.v_spend_runs` (per run), `ops.v_spend_agent_daily` and `ops.v_spend_daily` (per UTC day).
+- Logging failures are logged and swallowed: they never break or slow a model call.
+- **Tests:** `test-spend-log` in CI (12 checks). Covers one row per answered call; unpriced vs priced; price changes; refused calls; a crash mid-run (5 rows for 5 answered calls, though 6 were started); views adding up; cache pricing.
+
 ### External event ingress: Gmail push (V1)
 
 The base's first event from outside: a real provider pushes, we turn it into durable work. **A push is a wake-up signal, not a processing path.** The webhook never reads or interprets mail. It records the event and starts the existing Inbox Triage run, which reads from its own history cursor. The 20-minute schedule stays as the recovery path: Google may delay or drop a notification.

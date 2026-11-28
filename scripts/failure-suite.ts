@@ -178,7 +178,9 @@ async function t3(): Promise<Result> {
     (await one(db, `select count(*)::int n from ops.v_runs where run_state not in ('succeeded', 'failed', 'cancelled')`)).n === 0, 45_000).catch(() => undefined);
   await newW.kill('SIGTERM');
 
-  const sched = await all(db, `select workflow_id, run_state, executor_id from ops.v_runs where workflow_id like 'sched-%' order by workflow_id`);
+  // Only this agent's occurrences: other seeded agents (inbox-triage every 20 min, calendar-prep at 20:00 New York = 01:00 UTC)
+  // can fire in the same second, and their ids end in the same timestamp.
+  const sched = await all(db, `select workflow_id, run_state, executor_id from ops.v_runs where workflow_id like $1 order by workflow_id`, [`sched-agent-${AGENT}-%`]);
   const calls = mockCalls(mock);
   const doubled: Record<string, number[]> = {};
   for (const wf of new Set(calls.map((c) => c.wf))) {
