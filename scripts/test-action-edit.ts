@@ -98,7 +98,7 @@ try {
   const row = await one(db, `select agent_id, logical_action, target, payload, idempotency_key from ops.actions where id = $1`, [id]);
   await insertAction({ id: row.agent_id, approval_policy: { mode: 'manual' } } as never, 'refresh-sim',
     { action: row.logical_action, target: row.target, payload: { ...row.payload, draft: 'AI rewrite' }, idempotencyKey: row.idempotency_key, refreshPending: true });
-  check('an agent refresh after the owner edited leaves the edit (and its version) alone', (await action(id)).payload.draft === mine && (await action(id)).version === 2, await action(id));
+  check('INVARIANT: an agent refresh/rerun after the owner edited never replaces the edit (payload and version unchanged)', (await action(id)).payload.draft === mine && (await action(id)).version === 2, await action(id));
 
   // ---- approve exactly the edited version → Gmail gets exactly that text, once, even across a crash ----
   await restart({ CRASH_AFTER_PROVIDER_CALL: crashMarker, CRASH_AFTER_PROVIDER_CALL_ACTION: 'gmail.draft' });

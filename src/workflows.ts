@@ -196,7 +196,8 @@ export async function insertAction(
     `insert into ops.actions (agent_id, source_workflow_id, logical_action, target, payload, risk_level, idempotency_key)
      select $1, $2, $3, $4, $5, t.default_risk, $6 from ops.tools t where t.name = $3
      on conflict (idempotency_key) do update set
-       -- An agent may refresh an undecided proposal, but never over the owner's edit (edited_at set).
+       -- INVARIANT (edit before approve): once the owner has edited a proposal, no agent refresh or rerun replaces it
+       -- with a new AI proposal. Only the owner changes an edited payload (tested: test-action-edit).
        payload = case when $7 and ops.actions.status = 'pending_approval' and ops.actions.edited_at is null then excluded.payload else ops.actions.payload end,
        version = case when $7 and ops.actions.status = 'pending_approval' and ops.actions.edited_at is null and ops.actions.payload <> excluded.payload
                       then ops.actions.version + 1 else ops.actions.version end,

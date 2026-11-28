@@ -109,7 +109,7 @@ The owner can change what an agent proposed before approving it. This starts wit
   - The first edit copies the AI's original to `proposed_payload`, and it never changes again.
   - Every edit is logged in `ops.action_edits` (before/after, who, when).
   - Approving freezes the payload. The executor loads it in a checkpointed step and runs exactly that.
-- **Versions:** every change bumps `ops.actions.version`, whether an owner edit or an agent refresh. Edit and approve carry the version the owner saw, so a stale screen can neither overwrite a newer edit nor approve a payload the owner hasn't seen (409 stale, "review the latest version"). An agent's re-proposal (`refreshPending`) never overwrites an owner edit.
+- **Versions:** every change bumps `ops.actions.version`, whether an owner edit or an agent refresh. Edit and approve carry the version the owner saw, so a stale screen can neither overwrite a newer edit nor approve a payload the owner hasn't seen (409 stale, "review the latest version"). **Invariant:** once the owner has edited a proposal, no agent refresh or rerun replaces it with a new AI proposal. Only the owner changes an edited payload. (There is no "discard my edit" yet; the owner can edit the text back.)
 - **Reject** still rejects the whole action. **Nothing is sent:** approval still only creates the Gmail draft.
 - **App:**
   - **Edit** on any editable approval card opens the fields inline, with **Save**, **Save & approve** and **Cancel**.
