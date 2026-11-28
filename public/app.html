@@ -245,10 +245,12 @@ function actionButtons(item, after) {
   const send = async (a, btn, choice) => {
     btn.disabled = true;
     try {
-      const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid(), ...(choice ? { choice } : {}) } });
+      // Approve carries the payload version on screen: a proposal changed elsewhere is never approved blind.
+      const version = a.id === 'approve' && item.edit ? { version: item.edit.version } : {};
+      const r = await api(`/attention/${enc(item.type)}/${enc(item.ref)}/${a.id}`, { method: 'POST', body: { requestId: rid(), ...(choice ? { choice } : {}), ...version } });
       if (r.body.redirect) { location.href = r.body.redirect; return; }
       toast(r.body.message || (r.status < 300 ? 'Done' : 'Failed'));
-      if (r.status < 300) after(); else btn.disabled = false;
+      if (r.status < 300 || /changed since/.test(r.body.message ?? '')) after(); else btn.disabled = false;
     } catch (err) { handleErr(err); }
   };
   // An action with choices (e.g. Snooze: how long) swaps the row for its choices; a date choice shows a picker.
@@ -263,7 +265,41 @@ function actionButtons(item, after) {
     });
     row.replaceChildren(...kids, h('button', { class: 'back', onclick: (e) => { e.stopPropagation(); back(); } }, 'Cancel'));
   };
-  return (item.actions ?? []).map((a) => h('button', {
+  // Edit before approve: the proposal's editable fields open inline; Save stores the edit on the server (so it
+  // survives a reload), Save & approve stores it and approves exactly that version.
+  const showEditor = (row) => {
+    const ed = item.edit;
+    const inputs = ed.fields.map((f) => {
+      const el = f.multiline
+        ? h('textarea', { rows: 6, maxlength: f.maxLength, style: 'width:100%;font:inherit;font-size:16px' })
+        : h('input', { type: 'text', maxlength: f.maxLength, style: 'width:100%;font-size:16px' });
+      el.value = f.value;
+      el.addEventListener('click', (e) => e.stopPropagation());
+      return { f, el };
+    });
+    const save = async (btn) => {
+      btn.disabled = true;
+      try {
+        const r = await api(`/actions/${enc(ed.actionId)}`, { method: 'PATCH', body: { version: ed.version, fields: Object.fromEntries(inputs.map(({ f, el }) => [f.name, el.value])) } });
+        if (r.status >= 300) { toast(r.body.error ?? 'Could not save'); if (r.body.reason === 'stale' || r.body.reason === 'decided') after(); else btn.disabled = false; return null; }
+        ed.version = r.body.version; ed.edited = true;
+        return r.body.version;
+      } catch (err) { handleErr(err); return null; }
+    };
+    const box = h('div', { style: 'width:100%', onclick: (e) => e.stopPropagation() },
+      ...inputs.map(({ f, el }) => h('div', {}, h('div', { class: 'label' }, f.label), el)),
+      h('div', { class: 'actions' },
+        h('button', { onclick: async (e) => { e.stopPropagation(); if (await save(e.currentTarget)) { toast('Saved'); after(); } } }, 'Save'),
+        item.actions.some((a) => a.id === 'approve') ? h('button', { class: 'primary', onclick: async (e) => {
+          e.stopPropagation();
+          if (!(await save(e.currentTarget))) return;
+          send(item.actions.find((a) => a.id === 'approve'), e.currentTarget);
+        } }, 'Save & approve') : null,
+        h('button', { class: 'back', onclick: (e) => { e.stopPropagation(); row.replaceChildren(...actionButtons(item, after)); } }, 'Cancel')));
+    row.replaceChildren(box);
+  };
+  const editBtn = item.edit ? [h('button', { onclick: (e) => { e.stopPropagation(); showEditor(e.currentTarget.parentElement); } }, item.edit.edited ? 'Edit again' : 'Edit')] : [];
+  return [...editBtn, ...(item.actions ?? []).map((a) => h('button', {
     class: a.style ?? '',
     onclick: async (e) => {
       e.stopPropagation();
@@ -280,7 +316,7 @@ function actionButtons(item, after) {
       if (a.id === 'reject' && !confirm(`Reject "${item.title}"?`)) return;
       send(a, e.currentTarget);
     },
-  }, a.label));
+  }, a.label))];
 }
 
 async function needsYou() {

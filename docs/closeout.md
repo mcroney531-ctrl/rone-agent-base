@@ -100,6 +100,33 @@ The question: is the base provider-agnostic, or "a really good Google machine"? 
   - no profile → no judgment.
   Eval: `feed-watch` suite (24 scenarios).
 
+### Edit before approve (D)
+
+The owner can change what an agent proposed before approving it. This starts with draft replies and is built at the action layer so other proposals can opt in.
+
+- **Generic, declared per action type:** `ops.tools.editable_fields` (for `gmail.draft`: the reply text, required, at most 4,000 characters). Nothing else in the payload, such as the recipient, the thread or the connection, can be edited.
+- **The payload is what executes.**
+  - The first edit copies the AI's original to `proposed_payload`, and it never changes again.
+  - Every edit is logged in `ops.action_edits` (before/after, who, when).
+  - Approving freezes the payload. The executor loads it in a checkpointed step and runs exactly that.
+- **Versions:** every change bumps `ops.actions.version`, whether an owner edit or an agent refresh. Edit and approve carry the version the owner saw, so a stale screen can neither overwrite a newer edit nor approve a payload the owner hasn't seen (409 stale, "review the latest version"). An agent's re-proposal (`refreshPending`) never overwrites an owner edit.
+- **Reject** still rejects the whole action. **Nothing is sent:** approval still only creates the Gmail draft.
+- **App:**
+  - **Edit** on any editable approval card opens the fields inline, with **Save**, **Save & approve** and **Cancel**.
+  - Saved edits live on the server, so they survive reloads and other devices.
+  - Unsaved typing is protected by the dirty-screen rule (#32).
+  - The card says "Your edit:"; the drill-in shows the edit, the AI original and who edited.
+- **Tests:** `test-action-edit`, 20 checks in CI:
+  - edit → exact text in Gmail;
+  - persistence across a reload;
+  - stale save and stale approve refused;
+  - undeclared fields refused, and an empty reply refused;
+  - the real agent-refresh path leaves an edit alone;
+  - a crash right after Gmail accepted the edited draft → one draft with the owner's text;
+  - the payload is frozen after approval;
+  - an unedited approve is unchanged;
+  - reject after an edit sends nothing.
+
 ### Model-provider outages (Claude credits / key)
 
 Found in production twice: on Nov 23 the Anthropic account ran out of credits for ~40 minutes, and on Nov 24–27 an expired key caused 283 failed runs. Recovery already worked: claims and dead-run repair meant later runs triaged the mail exactly once. What was missing was a clear signal instead of hundreds of "Run failed" cards.

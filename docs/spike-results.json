@@ -9,7 +9,7 @@
         "executor_id": "t1-boot1"
       },
       "actionsAtKill": 0,
-      "recoverMs": 7682,
+      "recoverMs": 8694,
       "finalState": {
         "run_state": "succeeded",
         "recovery_attempts": "1",
@@ -468,7 +468,7 @@
       "executorHardDown": {
         "status": "failed",
         "error": "provider_unavailable: provider 503: injected fault (503)",
-        "run_state": "running",
+        "run_state": "failed",
         "error_class": "provider_unavailable"
       },
       "connectionExpired": {
@@ -485,7 +485,7 @@
       "attention": [
         {
           "kind": "action_failed",
-          "ref": "81c958c6-8173-4b57-8c56-8fb7f0e04558",
+          "ref": "f91ac7e6-4903-45ff-adf0-5196fa26fa71",
           "detail": "provider_unavailable: provider 503: injected fault (503)"
         },
         {

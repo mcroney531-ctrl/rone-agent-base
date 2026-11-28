@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { pool } from './db.js';
 import {
-  AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, reject, scheduledAgentRun, setExecutorEnqueuer,
+  AGENT_QUEUE, EXECUTOR_QUEUE, agentRun, approveAndEnqueue, editAction, reject, scheduledAgentRun, setExecutorEnqueuer,
 } from './workflows.js';
 import { deeperPrep } from './calendarPrep.js';
 import { briefView, setFeedback } from './briefs.js';
@@ -76,6 +76,7 @@ await applySql('016_credentials.sql');
 await applySql('017_feed_old_items.sql');
 await applySql('018_credential_managed_writes.sql');
 await applySql('019_provider_status.sql');
+await applySql('020_action_edits.sql');
 // The seed row points the spike agent at a local MCP server; deployed, it lives on another service.
 if (process.env.SPIKE_MCP_URL) {
   await pool.query(`update ops.agents set mcp_server_url = $1 where id = 'spike-agent'`, [process.env.SPIKE_MCP_URL]);
@@ -240,7 +241,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && parts.length === 4) {
         const body = await readJson(req);
-        const r = await actOnAttention(kind, ref, parts[3], by, String(body.requestId ?? ''), typeof body.choice === 'string' ? body.choice : undefined);
+        const r = await actOnAttention(kind, ref, parts[3], by, String(body.requestId ?? ''), typeof body.choice === 'string' ? body.choice : undefined,
+          Number.isInteger(body.version) ? Number(body.version) : undefined);
         return send(res, r.status, r);
       }
     }
@@ -401,10 +403,19 @@ const server = http.createServer(async (req, res) => {
       const { rows } = await pool.query(`select * from ops.v_runs order by created_at desc limit $1`, [limit]);
       return send(res, 200, rows);
     }
-    // POST /actions/:id/approve | /actions/:id/reject
+    // POST /actions/:id/approve | /actions/:id/reject. Approve may carry { version }: the payload version the
+    // caller saw; a newer payload is never approved blind (409 stale).
     if (req.method === 'POST' && parts[0] === 'actions' && parts[1] && ['approve', 'reject'].includes(parts[2] ?? '')) {
-      const out = parts[2] === 'approve' ? await approveAndEnqueue(parts[1], by) : await reject(parts[1], by);
+      const body = await readJson(req).catch(() => ({} as Record<string, unknown>));
+      const out = parts[2] === 'approve' ? await approveAndEnqueue(parts[1], by, Number.isInteger(body.version) ? Number(body.version) : undefined) : await reject(parts[1], by);
       return send(res, out.ok ? 200 : 409, out);
+    }
+    // PATCH /actions/:id { fields: { draft: "…" }, version }: edit a pending proposal before approving it.
+    if (req.method === 'PATCH' && parts[0] === 'actions' && parts[1] && parts.length === 2) {
+      const body = await readJson(req);
+      if (!Number.isInteger(body.version) || typeof body.fields !== 'object' || body.fields === null) return send(res, 400, { error: 'fields and version required' });
+      const out = await editAction(parts[1], body.fields as Record<string, unknown>, Number(body.version), by);
+      return out.ok ? send(res, 200, out) : send(res, out.status, { error: out.message, reason: out.reason, version: out.version });
     }
     // Briefs. GET /briefs/:date (YYYY-MM-DD) or /briefs/:uuid; ?agent= defaults to calendar-prep.
     if (req.method === 'GET' && url.pathname === '/briefs') {

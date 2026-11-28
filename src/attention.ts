@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { pool } from './db.js';
-import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE } from './workflows.js';
+import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE, type EditableField } from './workflows.js';
 import { startGoogleAuth } from './connections/google.js';
 import { closeNotNeeded, followUpNudge, snoozeItem } from './followUp.js';
 import { recordFeedback, removeSource } from './feedWatch.js';
@@ -29,6 +29,9 @@ export type AttentionItem = {
   severity: Severity;
   createdAt: string;
   actions: ItemAction[];
+  // Optional, additive: the item's proposal can be edited before approval (ops.tools.editable_fields).
+  // The app shows an Edit button, PATCHes /actions/:id with { fields, version }, and approves with { version }.
+  edit?: { actionId: string; version: number; edited: boolean; fields: (EditableField & { value: string })[] };
 };
 
 type Row = { kind: string; ref: string; agent_id: string | null; since: Date | null; detail: string | null; extra: Record<string, any> | null };
@@ -72,7 +75,7 @@ const KINDS: Record<string, { severity: Severity | ((r: Row) => Severity); title
         // Quote the first real sentence, not the greeting.
         const lines = String(p.draft ?? '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
         const first = lines.find((l) => !/^(hi|hello|hey|dear)\b[^.!?]*,?$/i.test(l)) ?? lines[0] ?? '';
-        return `${p.fromName ?? p.from ?? ''} · ${p.subject ?? ''}\n${p.summary ?? ''}\n“${first.length > 140 ? `${first.slice(0, 140)}…` : first}”`
+        return `${p.fromName ?? p.from ?? ''} · ${p.subject ?? ''}\n${p.summary ?? ''}\n${r.extra?.edited_at ? 'Your edit: ' : ''}“${first.length > 140 ? `${first.slice(0, 140)}…` : first}”`
           + (p.ownerNote ? `\nNote for you: ${p.ownerNote}` : '');
       }
       return r.detail ?? '';
@@ -203,7 +206,17 @@ function toItem(r: Row): AttentionItem {
     id: `${r.kind}:${r.ref}`, type: r.kind, ref: r.ref, agent: r.agent_id, source,
     title: k.title(r), summary: (k as typeof KINDS[string]).summary?.(r) ?? r.detail ?? '',
     severity: typeof k.severity === 'function' ? k.severity(r) : k.severity, createdAt: (r.since ?? new Date()).toISOString(), actions: k.actions(r),
+    ...editOf(r),
   };
+}
+
+// The edit descriptor for an approval whose action type declares editable fields.
+function editOf(r: Row): Pick<AttentionItem, 'edit'> {
+  const fields = (r.kind === 'approval_needed' ? (r.extra?.editable_fields ?? []) : []) as EditableField[];
+  if (!fields.length) return {};
+  const p = (r.extra?.payload ?? {}) as Record<string, unknown>;
+  return { edit: { actionId: r.ref, version: Number(r.extra?.version ?? 1), edited: Boolean(r.extra?.edited_at),
+    fields: fields.map((f) => ({ ...f, value: String(p[f.name] ?? '') })) } };
 }
 
 const ORDER: Record<Severity, number> = { decision: 0, problem: 1, info: 2 };
@@ -212,8 +225,10 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
   const { rows } = await pool.query(
     `select q.kind, q.ref, q.agent_id, q.since, q.detail,
             case when q.kind in ('approval_needed', 'action_failed') then
-              (select jsonb_build_object('logical_action', a.logical_action, 'payload', a.payload, 'target', a.target)
-                 from ops.actions a where a.id::text = q.ref)
+              (select jsonb_build_object('logical_action', a.logical_action, 'payload', a.payload, 'target', a.target,
+                        'version', a.version, 'edited_at', a.edited_at, 'edited_by', a.edited_by, 'proposed_payload', a.proposed_payload,
+                        'editable_fields', t.editable_fields)
+                 from ops.actions a join ops.tools t on t.name = a.logical_action where a.id::text = q.ref)
               when q.kind = 'follow_up_due' then
                 (select jsonb_build_object('counterpart', f.counterpart, 'counterpart_name', f.counterpart_name, 'subject', f.subject, 'expects', f.expects,
                          'last_owner_message_at', f.last_owner_message_at, 'due_at', f.due_at, 'explicit_date', f.explicit_date,
@@ -291,7 +306,9 @@ export async function attentionDetail(kind: string, ref: string) {
         add('From', p.from); add('Subject', p.subject); add('Summary', p.summary);
         add('Note for you', p.ownerNote); // the agent's question to the owner; never part of the draft
         if (p.to && p.to !== p.from) add('Reply to', p.to);
-        add('Draft', p.draft);
+        add(a.edited_at ? 'Draft (your edit)' : 'Draft', p.draft);
+        if (a.proposed_payload && a.proposed_payload.draft !== p.draft) add('Original draft (AI)', a.proposed_payload.draft);
+        if (a.edited_at) add('Edited', `${a.edited_by ?? '?'} · ${fmtWhen(a.edited_at)}`);
       } else {
         if (p.start) add('When', fmtRange(p.start, p.end));
         for (const [k2, v] of Object.entries(p)) if (!HIDDEN_FIELDS.has(k2)) add(humanize(k2), v);
@@ -340,7 +357,7 @@ export async function attentionDetail(kind: string, ref: string) {
 export type ActResult = { ok: boolean; status: number; message: string; redirect?: string; workflowId?: string };
 
 // Every action re-checks that the item still needs the owner and still offers that action.
-export async function actOnAttention(kind: string, ref: string, action: string, by: string, requestId?: string, choice?: string): Promise<ActResult> {
+export async function actOnAttention(kind: string, ref: string, action: string, by: string, requestId?: string, choice?: string, version?: number): Promise<ActResult> {
   const [row] = await rows({ kind, ref });
   if (!row) return { ok: false, status: 409, message: 'This no longer needs you.' };
   const item = toItem(row);
@@ -348,8 +365,9 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
 
   switch (action as ActionId) {
     case 'approve': {
-      const r = await approveAndEnqueue(ref, by);
-      return { ok: r.ok, status: r.ok ? 200 : 409, message: r.ok ? 'Approved — running now.' : `Already ${r.status}.` };
+      const r = await approveAndEnqueue(ref, by, version);
+      return { ok: r.ok, status: r.ok ? 200 : 409,
+        message: r.ok ? 'Approved — running now.' : r.status === 'stale' ? 'This changed since you opened it. Review the latest version, then approve.' : `Already ${r.status}.` };
     }
     case 'reject': {
       const r = await reject(ref, by);
