@@ -236,7 +236,12 @@ union all
 -- Follow-up Tracker: a message the owner sent is past due with no reply. The item itself is the reminder.
 select 'follow_up_due', f.id::text, f.agent_id, f.surfaced_at,
        coalesce(f.counterpart_name, f.counterpart[1]) || ' · ' || coalesce(f.expects, f.subject, '')
-  from ops.follow_up_items f where f.status = 'due'
+  from ops.follow_up_items f where f.status = 'due' and f.direction = 'waiting_on_them'
+union all
+-- Follow-up Tracker (023): something the owner promised is due. Only the owner closes it.
+select 'commitment_due', f.id::text, f.agent_id, f.surfaced_at,
+       coalesce(f.expects, f.subject, '') || ' · ' || coalesce(f.counterpart_name, f.counterpart[1])
+  from ops.follow_up_items f where f.status = 'due' and f.direction = 'owner_commitment'
 union all
 -- Research Watch: an item judged relevant for its CURRENT revision, surfaced (≤5 per source per run), unseen,
 -- from a source that is still watched.

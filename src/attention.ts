@@ -7,11 +7,11 @@ import { DBOS } from '@dbos-inc/dbos-sdk';
 import { pool } from './db.js';
 import { approveAndEnqueue, reject, agentRun, AGENT_QUEUE, type EditableField } from './workflows.js';
 import { startGoogleAuth } from './connections/google.js';
-import { closeNotNeeded, followUpNudge, snoozeItem } from './followUp.js';
+import { closeNotNeeded, followUpNudge, markDone, snoozeItem } from './followUp.js';
 import { recordFeedback, removeSource } from './feedWatch.js';
 import { DATE_KIND_LABEL, KNOWN_ONLY, getCredential, knownImpact, renewCredential, retireCredential, type DateKind } from './credentials.js';
 
-export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'snooze' | 'not_needed' | 'not_relevant' | 'remove_source' | 'renewed';
+export type ActionId = 'approve' | 'reject' | 'dismiss' | 'run_now' | 'reauth' | 'open' | 'nudge' | 'done' | 'snooze' | 'not_needed' | 'not_relevant' | 'remove_source' | 'renewed';
 // choices: the action needs one more input (e.g. Snooze: how long). The app shows them and POSTs { choice }.
 export type ActionChoice = { id: string; label: string; input?: 'date' };
 // url: an external link the app opens in a new tab; it still POSTs the action so the open is recorded.
@@ -44,6 +44,7 @@ const A = {
   reauth: { id: 'reauth', label: 'Reconnect', style: 'primary' },
   open: { id: 'open', label: 'View', style: 'primary' },
   nudge: { id: 'nudge', label: 'Draft nudge', style: 'primary' },
+  done: { id: 'done', label: 'Done', style: 'primary' },
   snooze: { id: 'snooze', label: 'Snooze', choices: [{ id: '1d', label: 'Tomorrow' }, { id: '3d', label: 'In 3 days' }, { id: '1w', label: 'Next week' }, { id: 'date', label: 'Pick a date', input: 'date' }] },
   notNeeded: { id: 'not_needed', label: 'Not needed' },
   notRelevant: { id: 'not_relevant', label: 'Not relevant' },
@@ -87,6 +88,18 @@ const KINDS: Record<string, { severity: Severity | ((r: Row) => Severity); title
     title: (r) => `Still waiting on ${r.extra?.counterpart_name ?? r.extra?.counterpart?.[0] ?? 'a reply'}`,
     summary: (r) => `Last message: ${fmtDay(r.extra?.last_owner_message_at)} · ${r.extra?.expects ?? r.extra?.subject ?? ''}`,
     actions: () => [A.nudge, A.snooze, A.notNeeded],
+  },
+  // Something the owner promised is due. Only the owner closes it: their reply doesn't fulfil it, and the owner's own
+  // later message in the thread is shown, not trusted. Never drafts anything (a nudge is for them, not for us).
+  commitment_due: {
+    severity: 'decision',
+    title: (r) => `You promised ${r.extra?.counterpart_name ?? r.extra?.evidence?.toWhom ?? r.extra?.counterpart?.[0] ?? 'someone'}: ${r.extra?.expects ?? r.extra?.subject ?? ''}`,
+    summary: (r) => [
+      r.extra?.explicit_date ? `Promised for ${fmtDay(`${r.extra.explicit_date}T12:00:00Z`)}` : `No date given · ${fmtDay(r.extra?.last_owner_message_at)}`,
+      r.extra?.evidence?.quote ? `“${r.extra.evidence.quote}”` : null,
+      r.extra?.owner_wrote_since ? `You've written in this thread since ${fmtDay(r.extra.owner_wrote_since)}` : null,
+    ].filter(Boolean).join(' · '),
+    actions: () => [A.done, A.snooze, A.notNeeded],
   },
   brief_ready: { severity: 'info', title: () => 'Brief is ready', actions: () => [A.open, A.dismiss] },
   deeper_ready: { severity: 'info', title: () => 'Deeper prep ready', actions: () => [A.open, A.dismiss] },
@@ -177,7 +190,7 @@ function credTitle(r: Row): string {
     : x.date_kind === 'review_by' ? `${name}: review due ${when}` : `${name}: expires ${when}`;
 }
 
-const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due']); // only resolving them clears them
+const DECISION_KINDS = new Set(['approval_needed', 'connection_problem', 'follow_up_due', 'commitment_due']); // only resolving them clears them
 const FALLBACK = { severity: 'problem' as Severity, title: (r: Row) => humanize(r.kind), actions: () => [A.dismiss] };
 
 function fmtWhen(v?: Date | string | null): string {
@@ -229,10 +242,10 @@ async function rows(filter?: { kind: string; ref: string }): Promise<Row[]> {
                         'version', a.version, 'edited_at', a.edited_at, 'edited_by', a.edited_by, 'proposed_payload', a.proposed_payload,
                         'editable_fields', t.editable_fields)
                  from ops.actions a join ops.tools t on t.name = a.logical_action where a.id::text = q.ref)
-              when q.kind = 'follow_up_due' then
+              when q.kind in ('follow_up_due', 'commitment_due') then
                 (select jsonb_build_object('counterpart', f.counterpart, 'counterpart_name', f.counterpart_name, 'subject', f.subject, 'expects', f.expects,
                          'last_owner_message_at', f.last_owner_message_at, 'due_at', f.due_at, 'explicit_date', f.explicit_date,
-                         'evidence', f.source_evidence, 'nudges', f.nudges)
+                         'evidence', f.source_evidence, 'nudges', f.nudges, 'owner_wrote_since', f.owner_wrote_since)
                    from ops.follow_up_items f where f.id::text = q.ref)
               when q.kind = 'provider_problem' then
                 (select jsonb_build_object('state', p.state, 'failures', p.failures,
@@ -282,6 +295,14 @@ export async function attentionDetail(kind: string, ref: string) {
     add('Subject', x.subject); add('For', x.expects); add('You wrote', x.evidence?.quote ? `“${x.evidence.quote}”` : null);
     add('Last message', fmtDay(x.last_owner_message_at)); add('Asked for by', x.explicit_date ? fmtDay(`${x.explicit_date}T12:00:00Z`) : null);
     if (x.nudges) add('Nudges so far', String(x.nudges));
+  }
+  if (kind === 'commitment_due') {
+    const x = row.extra ?? {};
+    add('Promised to', x.counterpart_name ? `${x.counterpart_name} <${x.counterpart?.[0]}>` : (x.counterpart ?? []).join(', '));
+    add('What', x.expects); add('Subject', x.subject); add('You wrote', x.evidence?.quote ? `“${x.evidence.quote}”` : null);
+    add('Promised for', x.explicit_date ? fmtDay(`${x.explicit_date}T12:00:00Z`) : 'No date given');
+    add('Sent', fmtDay(x.last_owner_message_at));
+    add('Since then', x.owner_wrote_since ? `You wrote in this thread on ${fmtDay(x.owner_wrote_since)}. Mark it done if that kept the promise.` : 'You have not written in this thread since.');
   }
   if (kind === 'feed_item') {
     // Provenance: exactly what this is and where it came from.
@@ -414,6 +435,9 @@ export async function actOnAttention(kind: string, ref: string, action: string, 
         return { ok: false, status: 400, message: (e as Error).message };
       }
     }
+    case 'done':
+      if (kind !== 'commitment_due') return { ok: false, status: 400, message: 'Unknown action.' };
+      return (await markDone(ref)) ? { ok: true, status: 200, message: 'Marked done.' } : { ok: false, status: 409, message: 'This no longer needs you.' };
     case 'not_needed':
       if (kind === 'credential_expiry') {
         return (await retireCredential(ref, { label: by, agent: false })) ? { ok: true, status: 200, message: 'Retired. No more warnings for it.' } : { ok: false, status: 409, message: 'This no longer needs you.' };

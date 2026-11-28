@@ -53,6 +53,7 @@ psql "$DB_URL" -q -f sql/019_provider_status.sql
 psql "$DB_URL" -q -f sql/020_action_edits.sql
 psql "$DB_URL" -q -f sql/021_model_calls.sql
 psql "$DB_URL" -q -f sql/022_model_call_latency.sql
+psql "$DB_URL" -q -f sql/023_owner_commitments.sql
 psql "$DB_URL" -q -f sql/002_views.sql
 echo "migrations applied: $(psql_db 'select version from dbos.dbos_migrations')"
 echo "v_runs: $(psql_db "select string_agg(workflow_id || '=' || dbos_status, ', ' order by workflow_id) from ops.v_runs")"
