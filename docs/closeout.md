@@ -144,14 +144,20 @@ Found in production twice: on Nov 23 the Anthropic account ran out of credits fo
 
 ### Model usage / spend log (V1: observation only)
 
-Recording, not enforcement: no caps, no alerts, no budget engine. The goal is a few weeks of real numbers before any budget or digest is designed.
+An operational ledger, not enforcement: no caps, no alerts, no budget engine. The goal is a few weeks of real numbers before any budget or digest is designed. Deliberately not stored: prompts, prompt hashes, response sizes, metadata blobs (eval provenance covers semantic changes).
 
-- **One row per real provider call** in `ops.model_calls`: provider, model (the model that served it), agent, run (DBOS workflow id), step, uncached input, output, cache-read and cache-write tokens, reasoning tokens when reported, estimated cost, timestamp.
-- **Written by model middleware inside the durable step** (`src/usageLog.ts`, next to `providerHealth`). A replayed checkpoint never reaches the provider, so it is never logged. A retried attempt the provider answered was paid for, so it is. A refused call (no answer) adds no row.
-- **Estimated cost** comes from `ops.model_prices` (USD per million tokens, Anthropic list prices seeded for Sonnet 5.5, Sonnet 5, Opus 5.5 and Haiku 5.5). A price change is a new row with a later `effective_from`: older calls keep the cost they were priced at. A model without a price row gets `NULL` cost and counts as "unpriced", never as $0. It is an estimate from token counts, not the Anthropic invoice.
-- **Totals are derived, never stored:** `ops.v_spend_runs` (per run), `ops.v_spend_agent_daily` and `ops.v_spend_daily` (per UTC day).
+- **One row per provider call attempt** in `ops.model_calls`:
+  - provider and model (the model that served it), agent, run (DBOS workflow id), step;
+  - uncached input, output, cache-read, cache-write and reasoning tokens; estimated cost;
+  - `started_at`, `duration_ms`, `outcome` (`success` | `provider_error` | `timeout` | `cancelled`);
+  - `attempt_number` (the DBOS step attempt, so one logical call retried twice reads 1, 2, 3 on the same step);
+  - `provider_request_id` (Anthropic's `request-id`, for billing/support questions).
+- **Written by model middleware inside the durable step** (`src/usageLog.ts`, next to `providerHealth`). A replayed checkpoint never reaches the provider, so it is never logged. Every attempt that reached the provider is logged, failed ones included. A call killed in flight by a crash leaves no row (no answer came back).
+- **Failed calls:** tokens and cost only if the provider reported usage; otherwise `NULL` (unknown), never a faked zero.
+- **Estimated cost** comes from `ops.model_prices` (USD per million tokens, Anthropic list prices seeded for Sonnet 5.5, Sonnet 5, Opus 5.5 and Haiku 5.5). A price change is a new row with a later `effective_from`: older calls keep the cost they were priced at. A successful call of a model without a price row gets `NULL` cost and counts as "unpriced", never as $0. It is an estimate from token counts, not the Anthropic invoice.
+- **Totals are derived, never stored:** `ops.v_spend_runs` (per run, with model time), `ops.v_spend_agent_daily` and `ops.v_spend_daily` (per UTC day, with failed calls and p50/p95 latency of successful calls). The views live in migration 022 only: every boot re-applies all migrations, so a view defined in 021 would try to drop 022's columns.
 - Logging failures are logged and swallowed: they never break or slow a model call.
-- **Tests:** `test-spend-log` in CI (12 checks). Covers one row per answered call; unpriced vs priced; price changes; refused calls; a crash mid-run (5 rows for 5 answered calls, though 6 were started); views adding up; cache pricing.
+- **Tests:** `test-spend-log` in CI (17 checks). Covers one row per answered call with latency, attempt and request id; unpriced vs priced; price changes; a refused call as one `provider_error` row with NULL tokens/cost; a retried overload as attempts 1..3 on one step; a crash mid-run (5 rows for 5 answered calls, though 6 were started); views adding up; cache pricing; outcome classification.
 
 ### External event ingress: Gmail push (V1)
 

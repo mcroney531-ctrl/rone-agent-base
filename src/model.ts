@@ -33,7 +33,7 @@ function scriptedMock() {
     outputTokens: { total: 20, text: 20, reasoning: 0 },
   };
   let seq = 0;
-  return new MockLanguageModelV4({
+  const mock = new MockLanguageModelV4({
     provider: 'mock',
     modelId: 'scripted-spike',
     doGenerate: async (options) => {
@@ -46,15 +46,15 @@ function scriptedMock() {
       const delay = Number(process.env.MOCK_DELAY_MS ?? 0);
       if (delay) await new Promise((r) => setTimeout(r, delay));
       if (failMode === 'auth') {
-        throw new APICallError({ message: 'invalid x-api-key', url: 'mock://', requestBodyValues: {}, statusCode: 401, isRetryable: false });
+        throw new APICallError({ message: 'invalid x-api-key', url: 'mock://', requestBodyValues: {}, statusCode: 401, isRetryable: false, responseHeaders: { 'request-id': 'req_mock_auth' } });
       }
       if (failMode === 'credits') {
         // Anthropic's real answer when the account has no credits (400, non-retryable).
         throw new APICallError({ message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
-          url: 'mock://', requestBodyValues: {}, statusCode: 400, isRetryable: false, responseBody: '{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}' });
+          url: 'mock://', requestBodyValues: {}, statusCode: 400, isRetryable: false, responseHeaders: { 'request-id': 'req_mock_credits' }, responseBody: '{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}' });
       }
       if (failMode === 'overloaded') {
-        throw new APICallError({ message: 'overloaded', url: 'mock://', requestBodyValues: {}, statusCode: 529, isRetryable: true });
+        throw new APICallError({ message: 'overloaded', url: 'mock://', requestBodyValues: {}, statusCode: 529, isRetryable: true, responseHeaders: { 'request-id': 'req_mock_overloaded' } });
       }
 
       // Calendar Prep paths: structured ranking (JSON response format) and the deeper-prep text pass.
@@ -139,6 +139,13 @@ function scriptedMock() {
       }
     },
   });
+  // Like the real API, every answer carries a request id (tests check it reaches the spend log).
+  const generate = mock.doGenerate.bind(mock);
+  mock.doGenerate = async (options) => {
+    const r = await generate(options);
+    return { ...r, response: { ...r.response, headers: { ...r.response?.headers, 'request-id': `req_mock_${process.pid}_${seq}` } } };
+  };
+  return mock;
 }
 
 // Picks events with outside attendees or linked docs (what a sensible ranker would), holds for doc-heavy ones.
