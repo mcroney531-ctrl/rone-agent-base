@@ -134,6 +134,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-feed-watch.ts
 
+      - name: Provider health (Claude credits / key outage = one self-clearing Needs You item)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-provider-health.ts
+
       - name: Follow-up Tracker (fake Gmail) - durable items, reply-closes, snooze/not needed/nudge
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs

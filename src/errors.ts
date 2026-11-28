@@ -1,7 +1,7 @@
 import { APICallError, RetryError } from 'ai';
 import { DBOSWorkflowConflictError } from '@dbos-inc/dbos-sdk';
 
-export type ErrorClass = 'provider_auth' | 'provider_unavailable' | 'connection_unavailable' | 'validation' | 'internal';
+export type ErrorClass = 'provider_auth' | 'provider_billing' | 'provider_unavailable' | 'connection_unavailable' | 'validation' | 'internal';
 
 export class OpsError extends Error {
   constructor(public readonly errorClass: ErrorClass, message: string) {
@@ -40,6 +40,8 @@ export function classify(err: unknown): { errorClass: ErrorClass; message: strin
   if (e instanceof OpsError) return { errorClass: e.errorClass, message };
   if (APICallError.isInstance(e)) {
     const s = e.statusCode ?? 0;
+    // No credits is not "bad input" or "bad key": it needs billing, not a code or config fix.
+    if (/credit balance|purchase credits|plans\s*&\s*billing/i.test(`${message} ${e.responseBody ?? ''}`)) return { errorClass: 'provider_billing', message };
     if (s === 401 || s === 403) return { errorClass: 'provider_auth', message };
     if (s === 429 || s >= 500 || e.isRetryable) return { errorClass: 'provider_unavailable', message };
     return { errorClass: 'validation', message };
