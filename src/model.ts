@@ -6,6 +6,7 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { durableCalls } from '@dbos-inc/vercel-ai';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { providerHealth } from './providerHealth.js';
+import { usageLog } from './usageLog.js';
 
 // Every model call becomes a DBOS step: its output is checkpointed, so after a crash the
 // recovered workflow replays completed calls from Postgres instead of paying for them again.
@@ -13,8 +14,8 @@ export function agentModel(modelId: string): LanguageModel {
   const base = process.env.ANTHROPIC_API_KEY ? anthropic(modelId) : scriptedMock();
   return wrapLanguageModel({
     model: base,
-    // providerHealth sits INSIDE the durable step: it sees only real provider calls, never a replayed checkpoint.
-    middleware: [durableCalls({ retriesAllowed: true, maxAttempts: 3, intervalSeconds: 1, timeoutMS: 60_000 }), providerHealth],
+    // providerHealth and usageLog sit INSIDE the durable step: they see only real provider calls, never a replayed checkpoint.
+    middleware: [durableCalls({ retriesAllowed: true, maxAttempts: 3, intervalSeconds: 1, timeoutMS: 60_000 }), providerHealth, usageLog],
   });
 }
 

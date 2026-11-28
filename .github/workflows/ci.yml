@@ -144,6 +144,11 @@ jobs:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
         run: npx tsx scripts/test-action-edit.ts
 
+      - name: Spend log (one row per real model call, costed; replays not counted)
+        env:
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: npx tsx scripts/test-spend-log.ts
+
       - name: Follow-up Tracker (fake Gmail) - durable items, reply-closes, snooze/not needed/nudge
         env:
           SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
