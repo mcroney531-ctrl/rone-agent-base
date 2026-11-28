@@ -129,9 +129,9 @@
       },
       "expect": {
         "categories": [
-          "waiting_on_them"
+          "both"
         ],
-        "note": "asks AND promises: waiting on them"
+        "note": "asks AND firmly promises: both items (V1 labelled this waiting_on_them; A tracks both)"
       }
     },
     {
