@@ -156,24 +156,30 @@ function mockRanking(prompt: string) {
   return { headline: `${items.length} worth preparing for`, items };
 }
 
-// Follow-up Tracker stand-in: a question or "let me know" waits on them; "I'll …" with no ask is the owner's promise.
-// "by <weekday>" resolves to that weekday on or after the sent date.
+// Follow-up Tracker stand-in, per sentence: a question / "let me know" / "can you" asks (waiting); an "I'll …" or
+// "we'll …" sentence is a commitment. It is deliberately naive: every promise comes back firm, quoted verbatim, so the
+// tests prove the deterministic gate (src/followUp.ts commitmentGate) is what rejects hedged ones.
+// "by <weekday>" resolves to that weekday on or after the sent date, attached to the sentence that says it.
 function mockDetect(prompt: string) {
-  const rows = JSON.parse(/<sent>([\s\S]*)<\/sent>/.exec(prompt)?.[1] ?? '[]') as { ref: string; subject: string; sent: string; text: string }[];
+  const rows = JSON.parse(/<sent>([\s\S]*)<\/sent>/.exec(prompt)?.[1] ?? '[]') as { ref: string; subject: string; sent: string; text: string; to: string[] }[];
   const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const dateOf = (sentence: string, sentAt: string) => {
+    const by = /by (sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i.exec(sentence)?.[1]?.toLowerCase();
+    if (!by) return null;
+    const sent = new Date(`${sentAt.slice(-10)}T12:00:00Z`);
+    return new Date(sent.getTime() + ((days.indexOf(by) - sent.getUTCDay() + 7) % 7) * 86_400_000).toISOString().slice(0, 10);
+  };
   return {
     items: rows.map((r) => {
-      const t = r.text.toLowerCase();
-      const asks = /\?|let me know|can you|could you|please send/.test(t);
-      const promise = /\bi'?ll\b|\bi will\b/.test(t);
-      const by = /by (sunday|monday|tuesday|wednesday|thursday|friday|saturday)/.exec(t)?.[1];
-      let explicitDate: string | null = null;
-      if (by) {
-        const sent = new Date(`${r.sent.slice(-10)}T12:00:00Z`);
-        const add = (days.indexOf(by) - sent.getUTCDay() + 7) % 7;
-        explicitDate = new Date(sent.getTime() + add * 86_400_000).toISOString().slice(0, 10);
-      }
-      return { ref: r.ref, direction: asks ? 'waiting_on_them' : promise ? 'owner_promise' : 'none', expects: r.subject.slice(0, 40), explicitDate, evidence: r.text.slice(0, 60) };
+      const sentences = r.text.split(/(?<=[.?!])\s+/).filter(Boolean);
+      const ask = sentences.find((x) => /\?|let me know|can you|could you|please send/i.test(x));
+      const promise = sentences.find((x) => /\b(i'?ll|i will|we'?ll)\b/i.test(x) && !/\b(be out|be there|be back|be away)\b/i.test(x));
+      return {
+        ref: r.ref,
+        waiting: ask ? { expects: r.subject.slice(0, 40), explicitDate: dateOf(ask, r.sent), evidence: ask.slice(0, 60) } : null,
+        commitment: promise ? { deliverable: promise.replace(/^.*?\b(i'?ll|i will|we'?ll)\s+/i, '').replace(/[.!]$/, '').slice(0, 40), toWhom: r.to[0] ?? '',
+          ownerDate: dateOf(promise, r.sent), quote: promise, firm: true } : null,
+      };
     }),
   };
 }
